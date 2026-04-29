@@ -12,7 +12,14 @@ mock 是指模拟对象，通常用于测试代码中，特别是在单元测试
 举个例子，用户服务要调用订单服务，伪代码如下：
 
 ```java
+class UserServiceImpl {
 
+    void test() {
+        doSomething();
+        orderService.order();
+        doSomething();
+    }
+}
 ```
 
 如果订单服务还没上线，那么这个流程就跑不通，只能先把调用订单服务的代码注释掉。
@@ -40,7 +47,15 @@ mock 是指模拟对象，通常用于测试代码中，特别是在单元测试
 修改的代码如下：
 
 ```java
-
+@Data
+public class RpcConfig {
+    ...
+    
+    /**
+     * 模拟调用
+     */
+    private boolean mock = false;
+}
 ```
 
 2）在 Proxy 包下新增 `MockServiceProxy` 类，用于生成 mock 代理服务。
@@ -50,6 +65,57 @@ mock 是指模拟对象，通常用于测试代码中，特别是在单元测试
 完整代码如下：
 
 ```java
+package com.rom.romrpc.proxy;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * Mock 服务代理（JDK 动态代理）
+ * @author 
+ */
+@Slf4j
+public class MockServiceProxy implements InvocationHandler {
+
+    /**
+     * 调用代理
+     *
+     * @return
+     * @throws Throwable
+     */
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        // 根据方法的返回值类型，生成特定的默认值对象
+        Class<?> methodReturnType = method.getReturnType();
+        log.info("mock invoke {}", method.getName());
+        return getDefaultObject(methodReturnType);
+    }
+
+    /**
+     * 生成指定类型的默认值对象（可自行完善默认值逻辑）
+     *
+     * @param type
+     * @return
+     */
+    private Object getDefaultObject(Class<?> type) {
+        // 基本类型
+        if (type.isPrimitive()) {
+            if (type == boolean.class) {
+                return false;
+            } else if (type == short.class) {
+                return (short) 0;
+            } else if (type == int.class) {
+                return 0;
+            } else if (type == long.class) {
+                return 0L;
+            }
+        }
+        // 对象类型
+        return null;
+    }
+}
 
 ```
 
@@ -60,6 +126,48 @@ mock 是指模拟对象，通常用于测试代码中，特别是在单元测试
 修改 ServiceProxyFactory，完整代码如下：
 
 ```java
+package com.rom.romrpc.proxy;
+
+import java.lang.reflect.Proxy;
+
+import com.rom.romrpc.RpcApplication;
+
+/**
+ * 服务代理工厂
+ * @author 
+ */
+public class ServiceProxyFactory {
+    /**
+     * 根据服务类获取代理对象
+     * @param serviceClass 服务类
+     * @param <T> 服务类类型
+     * @return 代理对象
+     */
+    public static <T> T getProxy(Class<T> serviceClass) {
+        if(RpcApplication.getRpcConfig().isMock()) {
+            return getProxy(serviceClass);
+        }
+        return (T) Proxy.newProxyInstance(
+                        serviceClass.getClassLoader(),
+                        new Class[]{serviceClass}, 
+                        new ServiceProxy());
+    }
+
+    /**
+     * 根据服务类获取 Mock 代理对象
+     *
+     * @param serviceClass
+     * @param <T>
+     * @return
+     */
+    public static <T> T getMockProxy(Class<T> serviceClass) {
+        return (T) Proxy.newProxyInstance(
+                serviceClass.getClassLoader(),
+                new Class[]{serviceClass},
+                new MockServiceProxy());
+    }
+
+}
 
 ```
 
@@ -72,19 +180,62 @@ mock 是指模拟对象，通常用于测试代码中，特别是在单元测试
 代码如下：
 
 ```java
+public interface UserService {
+
+    /**
+     * 获取用户
+     * @param user 用户
+     * @return 
+     * */
+    User getUser(User user);
+
+    /**
+     * 新方法 - 获取数字
+     */
+    default short getNumber() {
+        return 1;
+    }
+}
 
 ```
 
 2）修改示例服务消费者中的`application.properties`，将 mock 设置为true：
 
 ```java
-
+rpc.mock=true
 ```
 
 3）修改 `ConsumerExample` 类，编写调用 `userService.getNumber`的测试代码：
 
 ```java
+package com.rom.example.consumer;
 
+import com.rom.example.common.model.User;
+import com.rom.example.common.service.UserService;
+import com.rom.romrpc.proxy.ServiceProxyFactory;
+
+/**
+ * 消费者示例
+ * @author 
+ */
+public class ConsumerExample {
+    
+    public static void main(String[] args) {
+        // 获取代理
+        UserService userService = ServiceProxyFactory.getProxy(UserService.class);
+        User user = new User();
+        user.setName("yupi");
+        // 调用
+        User newUser = userService.getUser(user);
+        if (newUser != null) {
+            System.out.println(newUser.getName());
+        } else {
+            System.out.println("user == null");
+        }
+        long number = userService.getNumber();
+        System.out.println(number);
+    }
+}
 ```
 
 应该能看到输出的结果值为 0，而不是 1，说明调用了 `MockServiceProxy` 模拟服务代理。当然也可以通过 Debug 的方式进行验证。
