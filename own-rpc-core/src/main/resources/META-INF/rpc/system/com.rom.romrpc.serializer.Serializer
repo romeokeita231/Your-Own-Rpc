@@ -1,0 +1,4 @@
+jdk=com.rom.romrpc.serializer.JdkSerializer
+json=com.rom.romrpc.serializer.JsonSerializer
+kryo=com.rom.romrpc.serializer.KryoSerializer
+hessian=com.rom.romrpc.serializer.HessianSerializer

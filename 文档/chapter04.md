@@ -166,6 +166,19 @@ kryo=com.rom.romrpc.serializer.KryoSerializer
 1）首先给项目的 pom.xml 中引入依赖：
 
 ```xml
+<!-- 序列化 -->
+<!-- https://mvnrepository.com/artifact/com.caucho/hessian -->
+<dependency>
+    <groupId>com.caucho</groupId>
+    <artifactId>hessian</artifactId>
+    <version>4.0.66</version>
+</dependency>
+<!-- https://mvnrepository.com/artifact/com.esotericsoftware/kryo -->
+<dependency>
+    <groupId>com.esotericsoftware</groupId>
+    <artifactId>kryo</artifactId>
+    <version>5.6.2</version>
+</dependency>
 ```
 
 2）然后在序列化器包 `serializer` 中分别实现这三种序列化器，此处大家参考网上的代码、或者利用 AI 生成即可，不需要死记硬背。
@@ -177,7 +190,78 @@ JSON 序列化器的实现相对复杂，要考虑一些对象转换的兼容性
 代码如下：
 
 ```java
+package com.rom.romrpc.serializer;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.rom.romrpc.model.RpcRequest;
+import com.rom.romrpc.model.RpcResponse;
+
+import java.io.IOException;
+
+/**
+ * Json 序列化器
+ * @author 
+ */
+public class JsonSerializer implements Serializer {
+
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+    @Override
+    public <T> byte[] serialize(T object) throws IOException {
+        return OBJECT_MAPPER.writeValueAsBytes(object);
+    }
+
+    @Override
+    public <T> T deserialize(byte[] bytes, Class<T> type) throws IOException {
+        T obj = OBJECT_MAPPER.readValue(bytes, type);
+        if (obj instanceof RpcRequest) {
+            return handleRequest((RpcRequest) obj, type);
+        }
+        if (obj instanceof RpcResponse) {
+            return handleResponse((RpcResponse) obj, type);
+        }
+        return obj;
+    }
+
+    /**
+     * 由于 Object 的原始对象会被擦除，导致反序列化时会被作为 LinkedHashMap 无法转换成原始对象，因此这里做了特殊处理
+     *
+     * @param rpcRequest rpc 请求
+     * @param type       类型
+     * @return {@link T}
+     * @throws IOException IO异常
+     */
+    private <T> T handleRequest(RpcRequest rpcRequest, Class<T> type) throws IOException {
+        Class<?>[] parameterTypes = rpcRequest.getParameterTypes();
+        Object[] args = rpcRequest.getArgs();
+
+        // 循环处理每个参数的类型
+        for (int i = 0; i < parameterTypes.length; i++) {
+            Class<?> clazz = parameterTypes[i];
+            // 如果类型不同，则重新处理一下类型
+            if (!clazz.isAssignableFrom(args[i].getClass())) {
+                byte[] argBytes = OBJECT_MAPPER.writeValueAsBytes(args[i]);
+                args[i] = OBJECT_MAPPER.readValue(argBytes, clazz);
+            }
+        }
+        return type.cast(rpcRequest);
+    }
+
+     /**
+     * 由于 Object 的原始对象会被擦除，导致反序列化时会被作为 LinkedHashMap 无法转换成原始对象，因此这里做了特殊处理
+     *
+     * @param rpcResponse rpc 响应
+     * @param type        类型
+     * @return {@link T}
+     * @throws IOException IO异常
+     */
+    private <T> T handleResponse(RpcResponse rpcResponse, Class<T> type) throws IOException {
+        // 处理响应数据
+        byte[] dataBytes = OBJECT_MAPPER.writeValueAsBytes(rpcResponse.getData());
+        rpcResponse.setData(OBJECT_MAPPER.readValue(dataBytes, rpcResponse.getDataType()));
+        return type.cast(rpcResponse);
+    }
+}
 ```
 
 #### Kryo 序列化器
@@ -187,7 +271,51 @@ Kryo 本身是线程不安全的，所以需要使用 ThreadLocal 保证每个�
 代码如下：
 
 ```java
+package com.rom.romrpc.serializer;
 
+import com.esotericsoftware.kryo.Kryo;
+import com.esotericsoftware.kryo.io.Input;
+import com.esotericsoftware.kryo.io.Output;
+
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+
+/**
+ * Kryo 序列化器
+ * @author 
+ */
+public class KryoSerializer implements Serializer {
+
+    /**
+     * kryo 线程不安全，使用 ThreadLocal 保证每个线程只有一个 Kryo
+     */
+    private static final ThreadLocal<Kryo> KRYO_THREAD_LOCAL = ThreadLocal.withInitial(() -> {
+        Kryo kryo = new Kryo();
+        // 设置动态动态序列化和反序列化类，不提前注册所有类（可能有安全问题）
+        kryo.setRegistrationRequired(false);
+        return kryo;
+    });
+
+    @Override
+    public <T> byte[] serialize(T object) throws IOException {
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        Output output = new Output(byteArrayOutputStream);
+        KRYO_THREAD_LOCAL.get().writeObject(output, object);
+        output.close();
+        return byteArrayOutputStream.toByteArray();
+    }
+
+    @Override
+    public <T> T deserialize(byte[] bytes, Class<T> type) throws IOException {
+        ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(bytes);
+        Input input = new Input(byteArrayInputStream);
+        T result = KRYO_THREAD_LOCAL.get().readObject(input, type);
+        input.close();
+        return result;
+    }
+}
 ```
 
 #### Hessian 序列化器
@@ -195,7 +323,36 @@ Kryo 本身是线程不安全的，所以需要使用 ThreadLocal 保证每个�
 实现比较简单，完整代码如下：
 
 ```java
+package com.rom.romrpc.serializer;
 
+import com.caucho.hessian.io.HessianInput;
+import com.caucho.hessian.io.HessianOutput;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+
+/**
+ * Hessian 序列化器
+ * @author 
+ */
+public class HessianSerializer implements Serializer {
+
+    @Override
+    public <T> byte[] serialize(T object) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        HessianOutput ho = new HessianOutput(bos);
+        ho.writeObject(object);
+        return bos.toByteArray();
+    }
+
+    @Override
+    public <T> T deserialize(byte[] bytes, Class<T> type) throws IOException {
+        ByteArrayInputStream bis = new ByteArrayInputStream(bytes);
+        HessianInput hi = new HessianInput(bis);
+        return (T) hi.readObject(type);
+    }
+}
 ```
 
 ### 2、动态使用序列化器
@@ -219,7 +376,17 @@ serializer
 代码如下：
 
 ```java
+/**
+ * 序列化器键名
+ */
+public interface SerializerKeys {
 
+    String JDK = "jdk";
+    String JSON = "json";
+    String KRYO = "kryo";
+    String HESSIAN = "hessian";
+
+}
 ```
 
 2）定义序列化器工厂。
@@ -229,11 +396,57 @@ serializer
 序列化器工厂代码如下，使用 Map 来维护序列化器实例：
 
 ```java
+package com.rom.romrpc.serializer;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * 序列化器工厂（用于获取序列化器对象）
+ *
+ * @author 
+ */
+public class SerializerFactory {
+
+    /**
+     * 序列化映射（用于实现单例）
+     */
+    private static final Map<String, Serializer> KEY_SERIALIZER_MAP = new HashMap<String, Serializer>() {{
+        put(SerializerKeys.JDK, new JdkSerializer());
+        put(SerializerKeys.JSON, new JsonSerializer());
+        put(SerializerKeys.KRYO, new KryoSerializer());
+        put(SerializerKeys.HESSIAN, new HessianSerializer());
+    }};
+
+    /**
+     * 默认序列化器
+     */
+    private static final Serializer DEFAULT_SERIALIZER = KEY_SERIALIZER_MAP.get("jdk");
+
+    /**
+     * 获取实例
+     *
+     * @param key
+     * @return
+     */
+    public static Serializer getInstance(String key) {
+        return KEY_SERIALIZER_MAP.getOrDefault(key, DEFAULT_SERIALIZER);
+    }
+
+}
 ```
 
 3）在全局配置类 RpcConfig 中补充序列化器的配置，代码如下：
 
 ```java
+public class RpcConfig {
+    ...
+    
+    /**
+     * 序列化器
+     */
+    private String serializer = SerializerKeys.JDK;
+}
 ```
 
 4）动态获取序列化器。
@@ -248,6 +461,9 @@ serializer
 更改代码如下：
 
 ```java
+// 指定序列化器
+final Serializer serializer = SerializerFactory.getInstance(RpcApplication.getRpcConfig().getSerializer());
+
 ```
 
 ### 3、自定义序列化器
@@ -291,6 +507,135 @@ kryo=com.rom.romrpc.serializer.KryoSerializer
 完整代码如下：
 
 ```java
+package com.rom.romrpc.spi;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.URL;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import com.rom.romrpc.serializer.Serializer;
+import cn.hutool.core.io.resource.ResourceUtil;
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * SPI 加载器（支持键值对映射）
+ */
+@Slf4j
+public class SpiLoader {
+
+    /**
+     * 存储已加载的类：接口名 =>（key => 实现类）
+     */
+    private static Map<String, Map<String, Class<?>>> loaderMap = new ConcurrentHashMap<>();
+
+    /**
+     * 对象实例缓存（避免重复 new），类路径 => 对象实例，单例模式
+     */
+    private static Map<String, Object> instanceCache = new ConcurrentHashMap<>();
+
+    /**
+     * 系统 SPI 目录
+     */
+    private static final String RPC_SYSTEM_SPI_DIR = "META-INF/rpc/system/";
+
+    /**
+     * 用户自定义 SPI 目录
+     */
+    private static final String RPC_CUSTOM_SPI_DIR = "META-INF/rpc/custom/";
+
+    /**
+     * 扫描路径
+     */
+    private static final String[] SCAN_DIRS = new String[]{RPC_SYSTEM_SPI_DIR, RPC_CUSTOM_SPI_DIR};
+
+    /**
+     * 动态加载的类列表
+     */
+    private static final List<Class<?>> LOAD_CLASS_LIST = Arrays.asList(Serializer.class);
+
+    /**
+     * 加载所有类型
+     */
+    public static void loadAll() {
+        log.info("加载所有 SPI");
+        for (Class<?> aClass : LOAD_CLASS_LIST) {
+            load(aClass);
+        }
+    }
+
+    /**
+     * 获取某个接口的实例
+     *
+     * @param tClass
+     * @param key
+     * @param <T>
+     * @return
+     */
+    public static <T> T getInstance(Class<?> tClass, String key) {
+        String tClassName = tClass.getName();
+        Map<String, Class<?>> keyClassMap = loaderMap.get(tClassName);
+        if (keyClassMap == null) {
+            throw new RuntimeException(String.format("SpiLoader 未加载 %s 类型", tClassName));
+        }
+        if (!keyClassMap.containsKey(key)) {
+            throw new RuntimeException(String.format("SpiLoader 的 %s 不存在 key=%s 的类型", tClassName, key));
+        }
+        // 获取到要加载的实现类型
+        Class<?> implClass = keyClassMap.get(key);
+        // 从实例缓存中加载指定类型的实例
+        String implClassName = implClass.getName();
+        if (!instanceCache.containsKey(implClassName)) {
+            try {
+                instanceCache.put(implClassName, implClass.getDeclaredConstructor().newInstance());
+            } catch (Exception e) {
+                String errorMsg = String.format("%s 类实例化失败", implClassName);
+                throw new RuntimeException(errorMsg, e);
+            }
+        }
+        return (T) instanceCache.get(implClassName);
+    }
+
+    /**
+     * 加载某个类型
+     *
+     * @param loadClass
+     * @throws IOException
+     */
+    public static Map<String, Class<?>> load(Class<?> loadClass) {
+        log.info("加载类型为 {} 的 SPI", loadClass.getName());
+        // 扫描路径，用户自定义的 SPI 优先级高于系统 SPI
+        Map<String, Class<?>> keyClassMap = new HashMap<>();
+        for (String scanDir : SCAN_DIRS) {
+            List<URL> resources = ResourceUtil.getResources(scanDir + loadClass.getName());
+            // 读取每个资源文件
+            for (URL resource : resources) {
+                try {
+                    InputStreamReader inputStreamReader = new InputStreamReader(resource.openStream());
+                    BufferedReader bufferedReader = new BufferedReader(inputStreamReader);
+                    String line;
+                    while ((line = bufferedReader.readLine()) != null) {
+                        String[] strArray = line.split("=");
+                        if (strArray.length > 1) {
+                            String key = strArray[0];
+                            String className = strArray[1];
+                            keyClassMap.put(key, Class.forName(className));
+                        }
+                    }
+                } catch (Exception e) {
+                    log.error("spi resource load error", e);
+                }
+            }
+        }
+        loaderMap.put(loadClass.getName(), keyClassMap);
+        return keyClassMap;
+    }
+}
+
 ```
 
 上述代码中，虽然提供了 loadAll 方法，扫描所有路径下的文件进行加载，但其实没必要使用。更推荐使用 load 方法，按需加载指定的类。
@@ -304,6 +649,33 @@ kryo=com.rom.romrpc.serializer.KryoSerializer
 完整代码如下：
 
 ```java
+/**
+ * 序列化器工厂（用于获取序列化器对象）
+ *
+ * @author 
+ */
+public class SerializerFactory {
+
+     static {
+        SpiLoader.load(Serializer.class);
+    }
+
+    /**
+     * 默认序列化器
+     */
+    private static final Serializer DEFAULT_SERIALIZER = new JdkSerializer();
+
+    /**
+     * 获取实例
+     *
+     * @param key
+     * @return
+     */
+    public static Serializer getInstance(String key) {
+        return SpiLoader.getInstance(Serializer.class, key);
+    }
+    
+}
 ```
 
 使用静态代码块，在工厂首次加载时，就会调用 SpiLoader 的 load 方法加载序列化器接口的所有实现类，之后就可以通过调用 getInstance 方法获取指定的实现类对象了。

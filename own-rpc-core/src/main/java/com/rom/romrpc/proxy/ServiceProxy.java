@@ -11,10 +11,11 @@ import java.io.IOException;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 
+import com.rom.romrpc.RpcApplication;
 import com.rom.romrpc.model.RpcRequest;
 import com.rom.romrpc.model.RpcResponse;
-import com.rom.romrpc.serializer.JdkSerializer;
 import com.rom.romrpc.serializer.Serializer;
+import com.rom.romrpc.serializer.SerializerFactory;
 
 /**
  * 服务代理（JDK 动态代理）
@@ -35,7 +36,8 @@ public class ServiceProxy implements InvocationHandler {
         }
 
         // 指定序列化器
-        Serializer serializer = new JdkSerializer();
+        final Serializer serializer = SerializerFactory.getInstance(RpcApplication.getRpcConfig().getSerializer());
+
 
         // 构造请求
         RpcRequest rpcRequest = RpcRequest.builder()
