@@ -1,7 +1,10 @@
 package com.rom.romrpc;
 
+import com.rom.romrpc.config.RegistryConfig;
 import com.rom.romrpc.config.RpcConfig;
 import com.rom.romrpc.constant.RpcConstant;
+import com.rom.romrpc.registry.Registry;
+import com.rom.romrpc.registry.RegistryFactory;
 import com.rom.romrpc.utils.ConfigUtils;
 import lombok.extern.slf4j.Slf4j;
 
@@ -16,13 +19,19 @@ public class RpcApplication {
 
     /**
      * 框架初始化，支持传入自定义配置
-     *
-     * @param newRpcConfig
-     */
+    *
+    * @param newRpcConfig
+    */
     public static void init(RpcConfig newRpcConfig) {
-        rpcConfig = newRpcConfig;
-        log.info("rpc init, config = {}", newRpcConfig.toString());
+    rpcConfig = newRpcConfig;
+    log.info("rpc init, config = {}", newRpcConfig.toString());
+    // 注册中心初始化
+    RegistryConfig registryConfig = rpcConfig.getRegistryConfig();
+    Registry registry = RegistryFactory.getInstance(registryConfig.getRegistry());
+    registry.init(registryConfig);
+    log.info("registry init, config = {}", registryConfig);
     }
+
 
     /**
      * 初始化

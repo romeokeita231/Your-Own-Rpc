@@ -140,11 +140,50 @@ etcd 主流的 Java 客户端是 jetcd：https://github.com/etcd-io/jetcd。
 1）首先在项目中引入 jetcd：
 
 ```java
+<!-- https://mvnrepository.com/artifact/io.etcd/jetcd-core -->
+<dependency>
+    <groupId>io.etcd</groupId>
+    <artifactId>jetcd-core</artifactId>
+    <version>0.7.7</version>
+</dependency>
 ```
 
 2）按照官方文档的示例写 Demo：
 
 ```java
+package com.rom.romrpc.registry;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+
+import io.etcd.jetcd.ByteSequence;
+import io.etcd.jetcd.Client;
+import io.etcd.jetcd.KV;
+import io.etcd.jetcd.kv.GetResponse;
+
+public class EtcdRegistry {
+     public static void main(String[] args) throws ExecutionException, InterruptedException {
+        // create client using endpoints
+        Client client = Client.builder().endpoints("http://localhost:2379")
+                .build();
+
+        KV kvClient = client.getKVClient();
+        ByteSequence key = ByteSequence.from("test_key".getBytes());
+        ByteSequence value = ByteSequence.from("test_value".getBytes());
+
+        // put the key-value
+        kvClient.put(key, value).get();
+
+        // get the CompletableFuture
+        CompletableFuture<GetResponse> getFuture = kvClient.get(key);
+
+        // get the value from CompletableFuture
+        GetResponse response = getFuture.get();
+
+        // delete the key
+        kvClient.delete(key).get();
+    }
+}
 ```
 
 在上述代码中，我们使用 KVClient 来操作 etcd 写入和读取数据。除了 KVClient 客户端外，Etcd 还提供了很多其他客户端。
@@ -223,7 +262,65 @@ OK，了解了 Etcd 的基础用法后，我们还要设计服务注册信息如
 代码如下：
 
 ```java
+package com.rom.romrpc.model;
 
+/**
+ * 服务元信息（注册信息）
+ */
+public class ServiceMetaInfo {
+
+    /**
+     * 服务名称
+     */
+    private String serviceName;
+
+    /**
+     * 服务版本号
+     */
+    private String serviceVersion = "1.0";
+
+    /**
+     * 服务域名
+     */
+    private String serviceHost;
+
+    /**
+     * 服务端口号
+     */
+    private Integer servicePort;
+
+    /**
+     * 服务分组（暂未实现）
+     */
+    private String serviceGroup = "default";
+
+}
+```
+
+需要给 `ServiceMetaInfo` 增加一些工具方法，用于获取服务注册键名、获取服务注册节点键名等。
+
+代码如下：
+
+```java
+/**
+ * 获取服务键名
+ *
+ * @return
+ */
+public String getServiceKey() {
+    // 后续可扩展服务分组
+    // return String.format("%s:%s:%s", serviceName, serviceVersion, serviceGroup);
+    return String.format("%s:%s", serviceName, serviceVersion);
+}
+
+/**
+ * 获取服务注册节点键名
+ *
+ * @return
+ */
+public String getServiceNodeKey() {
+    return String.format("%s/%s:%s", getServiceKey(), serviceHost, servicePort);
+}
 ```
 
 由于注册信息里包含了服务版本号字段，所以我们也可以给 RpcRequest 对象补充服务版本号字段，可以先作为预留字段，默认值为 "1.0"，后续再自行实现。
@@ -231,11 +328,33 @@ OK，了解了 Etcd 的基础用法后，我们还要设计服务注册信息如
 在 RpcConstant 常量类中补充默认服务版本常量：
 
 ```java
+package com.rom.romrpc.constant;
+
+/**
+ * RPC 相关常量
+ */
+public interface RpcConstant {
+
+    /**
+     * 默认配置文件加载前缀
+     */
+    String DEFAULT_CONFIG_PREFIX = "rpc";
+
+    /**
+     * 默认服务版本
+     */
+    String DEFAULT_SERVICE_VERSION = "1.0";
+}
 ```
 
 在 RpcRequest 请求类中使用该常量，代码如下：
 
 ```java
+    /**
+     * 服务版本
+     */
+    private String serviceVersion = RpcConstant.DEFAULT_SERVICE_VERSION;
+
 ```
 
 2）注册中心配置。
@@ -245,11 +364,50 @@ OK，了解了 Etcd 的基础用法后，我们还要设计服务注册信息如
 代码如下：
 
 ```java
+package com.rom.romrpc.config;
+
+import lombok.Data;
+
+/**
+ * RPC 框架注册中心配置
+ */
+@Data
+public class RegistryConfig {
+
+    /**
+     * 注册中心类别
+     */
+    private String registry = "etcd";
+
+    /**
+     * 注册中心地址
+     */
+    private String address = "http://localhost:2379";
+
+    /**
+     * 用户名
+     */
+    private String username;
+
+    /**
+     * 密码
+     */
+    private String password;
+
+    /**
+     * 超时时间（单位毫秒）
+     */
+    private Long timeout = 10000L;
+}
 ```
 
 还要为 RpcConfig 全局配置补充注册中心配置，代码如下：
 
 ```java
+    /**
+     * 注册中心配置
+     */
+    private RegistryConfig registryConfig = new RegistryConfig();
 ```
 
 3）注册中心接口。
@@ -268,7 +426,54 @@ OK，了解了 Etcd 的基础用法后，我们还要设计服务注册信息如
 代码如下：
 
 ```java
+package com.rom.romrpc.registry;
 
+import java.util.List;
+
+import com.rom.romrpc.config.RegistryConfig;
+import com.rom.romrpc.model.ServiceMetaInfo;
+
+/**
+ * 注册中心
+ *
+ * @author 
+ */
+public interface Registry {
+
+    /**
+     * 初始化
+     *
+     * @param registryConfig
+     */
+    void init(RegistryConfig registryConfig);
+
+    /**
+     * 注册服务（服务端）
+     *
+     * @param serviceMetaInfo
+     */
+    void register(ServiceMetaInfo serviceMetaInfo) throws Exception;
+
+    /**
+     * 注销服务（服务端）
+     *
+     * @param serviceMetaInfo
+     */
+    void unRegister(ServiceMetaInfo serviceMetaInfo);
+
+    /**
+     * 服务发现（获取某服务的所有节点，消费端）
+     *
+     * @param serviceKey 服务键名
+     * @return
+     */
+    List<ServiceMetaInfo> serviceDiscovery(String serviceKey);
+
+    /**
+     * 服务销毁
+     */
+    void destroy();
+}
 ```
 
 4）Etcd 注册中心实现。
@@ -278,6 +483,23 @@ OK，了解了 Etcd 的基础用法后，我们还要设计服务注册信息如
 代码如下：
 
 ```java
+public class EtcdRegistry implements Registry {
+
+    private Client client;
+
+    private KV kvClient;
+    
+    /**
+     * 根节点
+     */
+    private static final String ETCD_ROOT_PATH = "/rpc/";
+
+    @Override
+    public void init(RegistryConfig registryConfig) {
+        client = Client.builder().endpoints(registryConfig.getAddress()).connectTimeout(Duration.ofMillis(registryConfig.getTimeout())).build();
+        kvClient = client.getKVClient();
+    }
+}
 ```
 
 上述代码中，我们定义 Etcd 键存储的根路径为 `/rpc/`，为了区分不同的项目。
@@ -285,26 +507,174 @@ OK，了解了 Etcd 的基础用法后，我们还要设计服务注册信息如
 依次实现不同的方法，首先是服务注册，创建 key 并设置过期时间，value 为服务注册信息的 JSON 序列化。代码如下：
 
 ```java
+@Override
+public void register(ServiceMetaInfo serviceMetaInfo) throws Exception {
+    // 创建 Lease 和 KV 客户端
+    Lease leaseClient = client.getLeaseClient();
+
+    // 创建一个 30 秒的租约
+    long leaseId = leaseClient.grant(30).get().getID();
+
+    // 设置要存储的键值对
+    String registerKey = ETCD_ROOT_PATH + serviceMetaInfo.getServiceNodeKey();
+    ByteSequence key = ByteSequence.from(registerKey, StandardCharsets.UTF_8);
+    ByteSequence value = ByteSequence.from(JSONUtil.toJsonStr(serviceMetaInfo), StandardCharsets.UTF_8);
+
+    // 将键值对与租约关联起来，并设置过期时间
+    PutOption putOption = PutOption.builder().withLeaseId(leaseId).build();
+    kvClient.put(key, value, putOption).get();
+}
 ```
 
 然后是服务注销，删除 key：
 
 ```java
+public void unRegister(ServiceMetaInfo serviceMetaInfo) {
+    kvClient.delete(ByteSequence.from(ETCD_ROOT_PATH + serviceMetaInfo.getServiceNodeKey(), StandardCharsets.UTF_8));
+}
 ```
 
 然后是服务发现，根据服务名称作为前缀，从 Etcd 获取服务下的节点列表：
 
 ```java
+public List<ServiceMetaInfo> serviceDiscovery(String serviceKey) {
+    // 前缀搜索，结尾一定要加 '/'
+    String searchPrefix = ETCD_ROOT_PATH + serviceKey + "/";
+
+    try {
+        // 前缀查询
+        GetOption getOption = GetOption.builder().isPrefix(true).build();
+        List<KeyValue> keyValues = kvClient.get(
+                        ByteSequence.from(searchPrefix, StandardCharsets.UTF_8),
+                        getOption)
+                .get()
+                .getKvs();
+        // 解析服务信息
+        return keyValues.stream()
+                .map(keyValue -> {
+                    String value = keyValue.getValue().toString(StandardCharsets.UTF_8);
+                    return JSONUtil.toBean(value, ServiceMetaInfo.class);
+                })
+                .collect(Collectors.toList());
+    } catch (Exception e) {
+        throw new RuntimeException("获取服务列表失败", e);
+    }
+}
 ```
 
 最后是注册中心销毁，用于项目关闭后释放资源：
 
 ```java
+public void destroy() {
+    System.out.println("当前节点下线");
+    // 释放资源
+    if (kvClient != null) {
+        kvClient.close();
+    }
+    if (client != null) {
+        client.close();
+    }
+}
 ```
 
 注册中心实现类的完整代码如下：
 
 ```java
+package com.rom.romrpc.registry;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import com.rom.romrpc.config.RegistryConfig;
+import com.rom.romrpc.model.ServiceMetaInfo;
+
+import cn.hutool.json.JSONUtil;
+import io.etcd.jetcd.ByteSequence;
+import io.etcd.jetcd.Client;
+import io.etcd.jetcd.KV;
+import io.etcd.jetcd.KeyValue;
+import io.etcd.jetcd.Lease;
+import io.etcd.jetcd.options.GetOption;
+import io.etcd.jetcd.options.PutOption;
+
+public class EtcdRegistry implements Registry {
+
+    private Client client;
+
+    private KV kvClient;
+    
+    /**
+     * 根节点
+     */
+    private static final String ETCD_ROOT_PATH = "/rpc/";
+
+    @Override
+    public void init(RegistryConfig registryConfig) {
+        client = Client.builder().endpoints(registryConfig.getAddress()).connectTimeout(Duration.ofMillis(registryConfig.getTimeout())).build();
+        kvClient = client.getKVClient();
+    }
+
+    @Override
+    public void register(ServiceMetaInfo serviceMetaInfo) throws Exception {
+    // 创建 Lease 和 KV 客户端
+    Lease leaseClient = client.getLeaseClient();
+
+    // 创建一个 30 秒的租约
+    long leaseId = leaseClient.grant(30).get().getID();
+
+    // 设置要存储的键值对
+    String registerKey = ETCD_ROOT_PATH + serviceMetaInfo.getServiceNodeKey();
+    ByteSequence key = ByteSequence.from(registerKey, StandardCharsets.UTF_8);
+    ByteSequence value = ByteSequence.from(JSONUtil.toJsonStr(serviceMetaInfo), StandardCharsets.UTF_8);
+
+    // 将键值对与租约关联起来，并设置过期时间
+    PutOption putOption = PutOption.builder().withLeaseId(leaseId).build();
+    kvClient.put(key, value, putOption).get();
+    }
+
+
+    public void unRegister(ServiceMetaInfo serviceMetaInfo) {
+    kvClient.delete(ByteSequence.from(ETCD_ROOT_PATH + serviceMetaInfo.getServiceNodeKey(), StandardCharsets.UTF_8));
+    }
+
+    public List<ServiceMetaInfo> serviceDiscovery(String serviceKey) {
+    // 前缀搜索，结尾一定要加 '/'
+    String searchPrefix = ETCD_ROOT_PATH + serviceKey + "/";
+
+    try {
+        // 前缀查询
+        GetOption getOption = GetOption.builder().isPrefix(true).build();
+        List<KeyValue> keyValues = kvClient.get(
+                        ByteSequence.from(searchPrefix, StandardCharsets.UTF_8),
+                        getOption)
+                .get()
+                .getKvs();
+        // 解析服务信息
+        return keyValues.stream()
+                .map(keyValue -> {
+                    String value = keyValue.getValue().toString(StandardCharsets.UTF_8);
+                    return JSONUtil.toBean(value, ServiceMetaInfo.class);
+                })
+                .collect(Collectors.toList());
+    } catch (Exception e) {
+        throw new RuntimeException("获取服务列表失败", e);
+        }
+    }
+
+    public void destroy() {
+    System.out.println("当前节点下线");
+    // 释放资源
+    if (kvClient != null) {
+        kvClient.close();
+    }
+    if (client != null) {
+        client.close();
+        }   
+    }
+
+}
 ```
 
 ### 2、支持配置和扩展注册中心
@@ -320,6 +690,16 @@ OK，了解了 Etcd 的基础用法后，我们还要设计服务注册信息如
 代码如下：
 
 ```java
+/**
+ * 注册中心键名常量
+ */
+public interface RegistryKeys {
+
+    String ETCD = "etcd";
+
+    String ZOOKEEPER = "zookeeper";
+
+}
 ```
 
 2）使用工厂模式，支持根据 key 从 SPI 获取注册中心对象实例。
@@ -327,6 +707,37 @@ OK，了解了 Etcd 的基础用法后，我们还要设计服务注册信息如
 在 registry 包下新建 `RegistryFactory` 类，代码如下：
 
 ```java
+package com.rom.romrpc.registry;
+
+import com.rom.romrpc.spi.SpiLoader;
+
+/**
+ * 注册中心工厂（用于获取注册中心对象）
+ *
+ * @author
+ */
+public class RegistryFactory {
+
+    static {
+        SpiLoader.load(Registry.class);
+    }
+
+    /**
+     * 默认注册中心
+     */
+    private static final Registry DEFAULT_REGISTRY = new EtcdRegistry();
+
+    /**
+     * 获取实例
+     *
+     * @param key
+     * @return
+     */
+    public static Registry getInstance(String key) {
+        return SpiLoader.getInstance(Registry.class, key);
+    }
+
+}
 ```
 
 这个类可以直接复制之前的 SerializerFactory，然后略做修改。可以发现，只要跑通了 SPI 机制，后续的开发就很简单了~
@@ -346,6 +757,20 @@ etcd = com.rom.romrpc.registry.EtcdRegistry
 修改其 init 方法代码如下：
 
 ```java
+/**
+ * 框架初始化，支持传入自定义配置
+ *
+ * @param newRpcConfig
+ */
+public static void init(RpcConfig newRpcConfig) {
+    rpcConfig = newRpcConfig;
+    log.info("rpc init, config = {}", newRpcConfig.toString());
+    // 注册中心初始化
+    RegistryConfig registryConfig = rpcConfig.getRegistryConfig();
+    Registry registry = RegistryFactory.getInstance(registryConfig.getRegistry());
+    registry.init(registryConfig);
+    log.info("registry init, config = {}", registryConfig);
+}
 ```
 
 ### 3、完成调用流程
@@ -356,21 +781,149 @@ etcd = com.rom.romrpc.registry.EtcdRegistry
 
 需要给 `ServiceMetaInfo` 类增加一个方法，便于获取可调用的地址，代码如下：
 
-```
+```java
+/**
+ * 获取完整服务地址
+ *
+ * @return
+ */
+public String getServiceAddress() {
+    if (!StrUtil.contains(serviceHost, "http")) {
+        return String.format("http://%s:%s", serviceHost, servicePort);
+    }
+    return String.format("%s:%s", serviceHost, servicePort);
+}
 ```
 
 2）修改服务代理 `ServiceProxy` 类，更改调用逻辑。
 
 修改的部分代码如下：
 
-```
+```java
+...
+
+// 序列化
+byte[] bodyBytes = serializer.serialize(rpcRequest);
+
+// 从注册中心获取服务提供者请求地址
+RpcConfig rpcConfig = RpcApplication.getRpcConfig();
+Registry registry = RegistryFactory.getInstance(rpcConfig.getRegistryConfig().getRegistry());
+ServiceMetaInfo serviceMetaInfo = new ServiceMetaInfo();
+serviceMetaInfo.setServiceName(serviceName);
+serviceMetaInfo.setServiceVersion(RpcConstant.DEFAULT_SERVICE_VERSION);
+List<ServiceMetaInfo> serviceMetaInfoList = registry.serviceDiscovery(serviceMetaInfo.getServiceKey());
+if (CollUtil.isEmpty(serviceMetaInfoList)) {
+    throw new RuntimeException("暂无服务地址");
+}
+// 暂时先取第一个
+ServiceMetaInfo selectedServiceMetaInfo = serviceMetaInfoList.get(0);
+
+// 发送请求
+try (HttpResponse httpResponse = HttpRequest.post(selectedServiceMetaInfo.getServiceAddress())
+        .body(bodyBytes)
+        .execute()) {
+    byte[] result = httpResponse.bodyBytes();
+    // 反序列化
+    RpcResponse rpcResponse = serializer.deserialize(result, RpcResponse.class);
+    return rpcResponse.getData();
+}
+
+...
 ```
 
 注意，从注册中心获取到的服务节点地址可能是多个。上述代码中，我们为了方便，暂时先取第一个，之后会带大家对这里的代码进行优化。
 
 `ServiceProxy` 的完整代码如下：
 
-```
+```java
+package com.rom.romrpc.proxy;
+
+import cn.hutool.core.collection.CollUtil;
+import cn.hutool.http.HttpRequest;
+import cn.hutool.http.HttpResponse;
+
+import java.io.IOException;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.util.List;
+
+import com.rom.romrpc.RpcApplication;
+import com.rom.romrpc.config.RpcConfig;
+import com.rom.romrpc.constant.RpcConstant;
+import com.rom.romrpc.model.RpcRequest;
+import com.rom.romrpc.model.RpcResponse;
+import com.rom.romrpc.model.ServiceMetaInfo;
+import com.rom.romrpc.registry.Registry;
+import com.rom.romrpc.registry.RegistryFactory;
+import com.rom.romrpc.serializer.Serializer;
+import com.rom.romrpc.serializer.SerializerFactory;
+
+/**
+ * 服务代理（JDK 动态代理）
+ */
+public class ServiceProxy implements InvocationHandler {
+
+    /**
+     * 调用代理
+     *
+     * @return
+     * @throws Throwable
+     */
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        // 过滤 Object 类的方法（toString、hashCode、equals 等）
+        if (method.getDeclaringClass() == Object.class) {
+            return method.invoke(this, args);
+        }
+
+        // 指定序列化器
+        final Serializer serializer = SerializerFactory.getInstance(RpcApplication.getRpcConfig().getSerializer());
+
+
+        // 构造请求
+        String serviceName = method.getDeclaringClass().getName();
+        RpcRequest rpcRequest = RpcRequest.builder()
+                .serviceName(serviceName)
+                .methodName(method.getName())
+                .parameterTypes(method.getParameterTypes())
+                .args(args)
+                .build();
+        try {
+            // 序列化
+            byte[] bodyBytes = serializer.serialize(rpcRequest);
+
+            // 从注册中心获取服务提供者请求地址
+            RpcConfig rpcConfig = RpcApplication.getRpcConfig();
+            Registry registry = RegistryFactory.getInstance(rpcConfig.getRegistryConfig().getRegistry());
+            ServiceMetaInfo serviceMetaInfo = new ServiceMetaInfo();
+            serviceMetaInfo.setServiceName(serviceName);
+            serviceMetaInfo.setServiceVersion(RpcConstant.DEFAULT_SERVICE_VERSION);
+            List<ServiceMetaInfo> serviceMetaInfoList = registry.serviceDiscovery(serviceMetaInfo.getServiceKey());
+            if (CollUtil.isEmpty(serviceMetaInfoList)) {
+                throw new RuntimeException("暂无服务地址");
+            }
+            // 暂时先取第一个
+            ServiceMetaInfo selectedServiceMetaInfo = serviceMetaInfoList.get(0);
+
+            // 发送请求
+            try (HttpResponse httpResponse = HttpRequest.post(selectedServiceMetaInfo.getServiceAddress())
+                    .body(bodyBytes)
+                    .execute()) {
+                byte[] result = httpResponse.bodyBytes();
+                // 反序列化
+                RpcResponse rpcResponse = serializer.deserialize(result, RpcResponse.class);
+                return rpcResponse.getData();
+            }
+
+            
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        return null;
+    }
+}
+
 ```
 
 ## 四、测试
@@ -381,7 +934,78 @@ etcd = com.rom.romrpc.registry.EtcdRegistry
 
 编写单元测试类 `RegistryTest`，代码如下：
 
-```
+```java
+package com.rom.romrpc.registry;
+
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+
+import com.rom.romrpc.config.RegistryConfig;
+import com.rom.romrpc.model.ServiceMetaInfo;
+
+/**
+ * 注册中心测试
+ *
+ * @author 
+ */
+public class RegistryTest {
+
+    final Registry registry = new EtcdRegistry();
+
+    @BeforeEach
+    public void init() {
+        RegistryConfig registryConfig = new RegistryConfig();
+        registryConfig.setAddress("http://localhost:2379");
+        registry.init(registryConfig);
+    }
+
+    @Test
+    public void register() throws Exception {
+        ServiceMetaInfo serviceMetaInfo = new ServiceMetaInfo();
+        serviceMetaInfo.setServiceName("myService");
+        serviceMetaInfo.setServiceVersion("1.0");
+        serviceMetaInfo.setServiceHost("localhost");
+        serviceMetaInfo.setServicePort(1234);
+        registry.register(serviceMetaInfo);
+        serviceMetaInfo = new ServiceMetaInfo();
+        serviceMetaInfo.setServiceName("myService");
+        serviceMetaInfo.setServiceVersion("1.0");
+        serviceMetaInfo.setServiceHost("localhost");
+        serviceMetaInfo.setServicePort(1235);
+        registry.register(serviceMetaInfo);
+        serviceMetaInfo = new ServiceMetaInfo();
+        serviceMetaInfo.setServiceName("myService");
+        serviceMetaInfo.setServiceVersion("2.0");
+        serviceMetaInfo.setServiceHost("localhost");
+        serviceMetaInfo.setServicePort(1234);
+        registry.register(serviceMetaInfo);
+    }
+
+    @Test
+    public void unRegister() {
+        ServiceMetaInfo serviceMetaInfo = new ServiceMetaInfo();
+        serviceMetaInfo.setServiceName("myService");
+        serviceMetaInfo.setServiceVersion("1.0");
+        serviceMetaInfo.setServiceHost("localhost");
+        serviceMetaInfo.setServicePort(1234);
+        registry.unRegister(serviceMetaInfo);
+    }
+
+    @Test
+    public void serviceDiscovery() {
+        ServiceMetaInfo serviceMetaInfo = new ServiceMetaInfo();
+        serviceMetaInfo.setServiceName("myService");
+        serviceMetaInfo.setServiceVersion("1.0");
+        String serviceKey = serviceMetaInfo.getServiceKey();
+        List<ServiceMetaInfo> serviceMetaInfoList = registry.serviceDiscovery(serviceKey);
+        Assertions.assertNotNull(serviceMetaInfoList);
+    }
+}
+
 ```
 
 服务注册后，打开 EtcdKeeper 可视化界面，能够看到注册成功的服务节点信息，如下：
@@ -397,6 +1021,53 @@ etcd = com.rom.romrpc.registry.EtcdRegistry
 代码如下：
 
 ```java
+package com.rom.example.provider;
+
+import com.rom.example.common.service.UserService;
+import com.rom.romrpc.RpcApplication;
+import com.rom.romrpc.config.RegistryConfig;
+import com.rom.romrpc.config.RpcConfig;
+import com.rom.romrpc.model.ServiceMetaInfo;
+import com.rom.romrpc.registry.LocalRegistry;
+import com.rom.romrpc.registry.Registry;
+import com.rom.romrpc.registry.RegistryFactory;
+import com.rom.romrpc.server.HttpServer;
+import com.rom.romrpc.server.VertxHttpServer;
+
+/**
+ * 提供者示例
+ * @author 
+ */
+public class ProviderExample {
+    public static void main(String[] args) {
+        // RPC 框架初始化
+        RpcApplication.init();
+        
+        // 注册服务
+        String serviceName = UserService.class.getName();
+        LocalRegistry.register(serviceName, UserServiceImpl.class);
+
+         // 注册服务到注册中心
+        RpcConfig rpcConfig = RpcApplication.getRpcConfig();
+        RegistryConfig registryConfig = rpcConfig.getRegistryConfig();
+        Registry registry = RegistryFactory.getInstance(registryConfig.getRegistry());
+        ServiceMetaInfo serviceMetaInfo = new ServiceMetaInfo();
+        serviceMetaInfo.setServiceName(serviceName);
+        serviceMetaInfo.setServiceHost(rpcConfig.getServerHost());
+        serviceMetaInfo.setServicePort(rpcConfig.getServerPort());
+        try {
+            registry.register(serviceMetaInfo);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+
+        // 启动 web 服务
+        HttpServer httpServer = new VertxHttpServer();
+        httpServer.doStart(RpcApplication.getRpcConfig().getServerPort());
+    }
+}
+
 ```
 
 服务消费者的代码不用改动，我们依然是先启动提供者、再启动消费者，验证流程能否正常跑通。
