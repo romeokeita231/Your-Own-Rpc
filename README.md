@@ -10,6 +10,8 @@
 
 ---
 
+> 💡 **历史遗留说明**：在 chapter05，提交注释为「注册中心基本实现」的提交中，RegistryTest 文件误建立在 example-provider 模块，正确位置应为 own-rpc-core 模块下
+
 ## 🚀 快速开始
 
 ### 1. 环境配置

@@ -35,6 +35,23 @@
 一个最简单的方法，就是写一个心跳检测接口，比如：
 
 ```java
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+class HealthCheckController {
+
+    // 健康检查接口
+    @GetMapping("/actuator/health")
+    public String healthCheck() {
+        // 在这里可以添加其他健康检查逻辑，例如检查数据库连接、第三方服务等
+
+        // 返回一个简单的健康状态
+        return "OK";
+    }
+}
 ```
 
 然后我们只需要执行一个脚本，定期调用这个接口，如果调用失败，就知道系统故障了。
@@ -64,6 +81,15 @@
 1）给注册中心 `Registry` 接口补充心跳检测方法，代码如下：
 
 ```java
+public interface Registry {
+
+    ...
+    
+    /**
+     * 心跳检测（服务端）
+     */
+    void heartBeat();
+}
 ```
 
 2）维护续期节点集合。
@@ -71,16 +97,45 @@
 定义一个本机注册的节点 key 集合，用于维护续期：
 
 ```java
+/**
+ * 本机注册的节点 key 集合（用于维护续期）
+ */
+private final Set<String> localRegisterNodeKeySet = new HashSet<>();
 ```
 
 在服务注册时，需要将节点添加到集合中，代码如下：
 
 ```java
+public void register(ServiceMetaInfo serviceMetaInfo) throws Exception {
+    // 创建 Lease 和 KV 客户端
+    Lease leaseClient = client.getLeaseClient();
+
+    // 创建一个 30 秒的租约
+    long leaseId = leaseClient.grant(30).get().getID();
+
+    // 设置要存储的键值对
+    String registerKey = ETCD_ROOT_PATH + serviceMetaInfo.getServiceNodeKey();
+    ByteSequence key = ByteSequence.from(registerKey, StandardCharsets.UTF_8);
+    ByteSequence value = ByteSequence.from(JSONUtil.toJsonStr(serviceMetaInfo), StandardCharsets.UTF_8);
+
+    // 将键值对与租约关联起来，并设置过期时间
+    PutOption putOption = PutOption.builder().withLeaseId(leaseId).build();
+    kvClient.put(key, value, putOption).get();
+    
+    // 添加节点信息到本地缓存
+    localRegisterNodeKeySet.add(registerKey);
+}
 ```
 
 同理，在服务注销时，也要从集合中移除对应节点：
 
 ```java
+public void unRegister(ServiceMetaInfo serviceMetaInfo) {
+    String registerKey = ETCD_ROOT_PATH + serviceMetaInfo.getServiceNodeKey();
+    kvClient.delete(ByteSequence.from(registerKey, StandardCharsets.UTF_8));
+    // 也要从本地缓存移除
+    localRegisterNodeKeySet.remove(registerKey);
+}
 ```
 
 3）在 `EtcdRegistry` 中实现 heartBeat 方法。
@@ -90,6 +145,38 @@
 心跳检测方法的代码如下：
 
 ```java
+@Override
+public void heartBeat() {
+    // 10 秒续签一次
+    CronUtil.schedule("*/10 * * * * *", new Task() {
+        @Override
+        public void execute() {
+            // 遍历本节点所有的 key
+            for (String key : localRegisterNodeKeySet) {
+                try {
+                    List<KeyValue> keyValues = kvClient.get(ByteSequence.from(key, StandardCharsets.UTF_8))
+                            .get()
+                            .getKvs();
+                    // 该节点已过期（需要重启节点才能重新注册）
+                    if (CollUtil.isEmpty(keyValues)) {
+                        continue;
+                    }
+                    // 节点未过期，重新注册（相当于续签）
+                    KeyValue keyValue = keyValues.get(0);
+                    String value = keyValue.getValue().toString(StandardCharsets.UTF_8);
+                    ServiceMetaInfo serviceMetaInfo = JSONUtil.toBean(value, ServiceMetaInfo.class);
+                    register(serviceMetaInfo);
+                } catch (Exception e) {
+                    throw new RuntimeException(key + "续签失败", e);
+                }
+            }
+        }
+    });
+
+    // 支持秒级别定时任务
+    CronUtil.setMatchSecond(true);
+    CronUtil.start();
+}
 ```
 
 采用这种实现方案的好处是，即时 Etcd 注册中心的数据出现了丢失，通过心跳检测机制也会重新注册节点信息。
@@ -101,6 +188,15 @@
 代码如下：
 
 ```java
+@Override
+public void init(RegistryConfig registryConfig) {
+    client = Client.builder()
+            .endpoints(registryConfig.getAddress())
+            .connectTimeout(Duration.ofMillis(registryConfig.getTimeout()))
+            .build();
+    kvClient = client.getKVClient();
+    heartBeat();
+}
 ```
 
 #### 测试
@@ -108,6 +204,27 @@
 完善之前的 `RegistryTest` 单元测试代码：
 
 ```java
+public class RegistryTest {
+
+    final Registry registry = new EtcdRegistry();
+
+    @BeforeEach
+    public void init() {
+        RegistryConfig registryConfig = new RegistryConfig();
+        registryConfig.setAddress("http://localhost:2379");
+        registry.init(registryConfig);
+    }
+
+    ...
+
+    @Test
+    public void heartBeat() throws Exception {
+        // init 方法中已经执行心跳检测了
+        register();
+        // 阻塞 1 分钟
+        Thread.sleep(60 * 1000L);
+    }
+}
 ```
 
 使用可视化工具观察节点底部的过期时间，当 TTL 到 20 左右的时候，又会重置为 30，说明心跳检测和续期机制正常执行。
@@ -140,6 +257,26 @@ Spring Boot 也提供了类似的优雅停机能力。
 代码如下：
 
 ```java
+public void destroy() {
+    System.out.println("当前节点下线");
+    // 下线节点
+    // 遍历本节点所有的 key
+    for (String key : localRegisterNodeKeySet) {
+        try {
+            kvClient.delete(ByteSequence.from(key, StandardCharsets.UTF_8)).get();
+        } catch (Exception e) {
+            throw new RuntimeException(key + "节点下线失败");
+        }
+    }
+
+    // 释放资源
+    if (kvClient != null) {
+        kvClient.close();
+    }
+    if (client != null) {
+        client.close();
+    }
+}
 ```
 
 2）在 RpcApplication 的 init 方法中，注册 Shutdown Hook，当程序正常退出时会执行注册中心的 destroy 方法。
@@ -147,6 +284,18 @@ Spring Boot 也提供了类似的优雅停机能力。
 代码如下：
 
 ```java
+public static void init(RpcConfig newRpcConfig) {
+    rpcConfig = newRpcConfig;
+    log.info("rpc init, config = {}", newRpcConfig.toString());
+    // 注册中心初始化
+    RegistryConfig registryConfig = rpcConfig.getRegistryConfig();
+    Registry registry = RegistryFactory.getInstance(registryConfig.getRegistry());
+    registry.init(registryConfig);
+    log.info("registry init, config = {}", registryConfig);
+    
+    // 创建并注册 Shutdown Hook，JVM 退出时执行操作
+    Runtime.getRuntime().addShutdownHook(new Thread(registry::destroy));
+}
 ```
 
 #### 测试
@@ -169,6 +318,48 @@ Spring Boot 也提供了类似的优雅停机能力。
 在 registry 包下新增缓存类 `RegistryServiceCache`，代码如下：
 
 ```java
+package com.rom.romrpc.registry;
+
+import java.util.List;
+
+import com.rom.romrpc.model.ServiceMetaInfo;
+
+/**
+ * 注册中心服务本地缓存
+ */
+public class RegistryServiceCache {
+
+    /**
+     * 服务缓存
+     */
+    List<ServiceMetaInfo> serviceCache;
+
+    /**
+     * 写缓存
+     *
+     * @param newServiceCache
+     * @return
+     */
+    void writeCache(List<ServiceMetaInfo> newServiceCache) {
+        this.serviceCache = newServiceCache;
+    }
+
+    /**
+     * 读缓存
+     *
+     * @return
+     */
+    List<ServiceMetaInfo> readCache() {
+        return this.serviceCache;
+    }
+
+    /**
+     * 清空缓存
+     */
+    void clearCache() {
+        this.serviceCache = null;
+    }
+}
 ```
 
 #### 2、使用本地缓存
@@ -176,6 +367,10 @@ Spring Boot 也提供了类似的优雅停机能力。
 1）修改 EtcdRegistry 的代码，使用本地缓存对象：
 
 ```java
+/**
+ * 注册中心服务缓存
+ */
+private final RegistryServiceCache registryServiceCache = new RegistryServiceCache();
 ```
 
 2）修改服务发现逻辑，优先从缓存获取服务；如果没有缓存，再从注册中心获取，并且设置到缓存中。
@@ -183,6 +378,43 @@ Spring Boot 也提供了类似的优雅停机能力。
 代码如下：
 
 ```java
+@Override
+public List<ServiceMetaInfo> serviceDiscovery(String serviceKey) {
+    // 优先从缓存获取服务
+    List<ServiceMetaInfo> cachedServiceMetaInfoList = registryServiceCache.readCache();
+    if (cachedServiceMetaInfoList != null) {
+        return cachedServiceMetaInfoList;
+    }
+
+    // 前缀搜索，结尾一定要加 '/'
+    String searchPrefix = ETCD_ROOT_PATH + serviceKey + "/";
+
+    try {
+        // 前缀查询
+        GetOption getOption = GetOption.builder().isPrefix(true).build();
+        List<KeyValue> keyValues = kvClient.get(
+                        ByteSequence.from(searchPrefix, StandardCharsets.UTF_8),
+                        getOption)
+                .get()
+                .getKvs();
+        // 解析服务信息
+        List<ServiceMetaInfo> serviceMetaInfoList = keyValues.stream()
+                .map(keyValue -> {
+                    String key = keyValue.getKey().toString(StandardCharsets.UTF_8);
+                    // 监听 key 的变化
+                    watch(key);
+                    String value = keyValue.getValue().toString(StandardCharsets.UTF_8);
+                    return JSONUtil.toBean(value, ServiceMetaInfo.class);
+                })
+                .collect(Collectors.toList());
+        
+        // 写入服务缓存
+        registryServiceCache.writeCache(serviceMetaInfoList);
+        return serviceMetaInfoList;
+    } catch (Exception e) {
+        throw new RuntimeException("获取服务列表失败", e);
+    }
+}
 ```
 
 #### 3、服务缓存更新 - 监听机制
@@ -208,6 +440,15 @@ Spring Boot 也提供了类似的优雅停机能力。
 1）Registry 注册中心接口补充监听 key 的方法，代码如下：
 
 ```java
+public interface Registry {
+
+    /**
+     * 监听（消费端）
+     *
+     * @param serviceNodeKey
+     */
+    void watch(String serviceNodeKey);
+}
 ```
 
 2）EtcdRegistry 类中，新增监听 key 的集合。
@@ -215,6 +456,10 @@ Spring Boot 也提供了类似的优雅停机能力。
 可以使用 ConcurrentHashSet 防止并发冲突，代码如下：
 
 ```java
+/**
+ * 正在监听的 key 集合
+ */
+private final Set<String> watchingKeySet = new ConcurrentHashSet<>();
 ```
 
 3）在 EtcdRegistry 类中实现监听 key 的方法。
@@ -226,6 +471,33 @@ Spring Boot 也提供了类似的优雅停机能力。
 代码如下：
 
 ```java
+/**
+ * 监听（消费端）
+ *
+ * @param serviceNodeKey
+ */
+@Override
+public void watch(String serviceNodeKey) {
+    Watch watchClient = client.getWatchClient();
+    // 之前未被监听，开启监听
+    boolean newWatch = watchingKeySet.add(serviceNodeKey);
+    if (newWatch) {
+        watchClient.watch(ByteSequence.from(serviceNodeKey, StandardCharsets.UTF_8), response -> {
+            for (WatchEvent event : response.getEvents()) {
+                switch (event.getEventType()) {
+                    // key 删除时触发
+                    case DELETE:
+                        // 清理注册服务缓存
+                        registryServiceCache.clearCache();
+                        break;
+                    case PUT:
+                    default:
+                        break;
+                }
+            }
+        });
+    }
+}
 ```
 
 4）在消费端获取服务时调用 watch 方法，对获取到的服务节点 key 进行监听。
@@ -233,135 +505,43 @@ Spring Boot 也提供了类似的优雅停机能力。
 修改服务发现方法的代码如下：
 
 ```java
+public List<ServiceMetaInfo> serviceDiscovery(String serviceKey) {
+    // 优先从缓存获取服务
+    List<ServiceMetaInfo> cachedServiceMetaInfoList = registryServiceCache.readCache();
+    if (cachedServiceMetaInfoList != null) {
+        return cachedServiceMetaInfoList;
+    }
+
+    // 前缀搜索，结尾一定要加 '/'
+    String searchPrefix = ETCD_ROOT_PATH + serviceKey + "/";
+
+    try {
+        // 前缀查询
+        GetOption getOption = GetOption.builder().isPrefix(true).build();
+        List<KeyValue> keyValues = kvClient.get(
+                        ByteSequence.from(searchPrefix, StandardCharsets.UTF_8),
+                        getOption)
+                .get()
+                .getKvs();
+        // 解析服务信息
+        List<ServiceMetaInfo> serviceMetaInfoList = keyValues.stream()
+                .map(keyValue -> {
+                    String key = keyValue.getKey().toString(StandardCharsets.UTF_8);
+                    // 监听 key 的变化
+                    watch(key);
+                    String value = keyValue.getValue().toString(StandardCharsets.UTF_8);
+                    return JSONUtil.toBean(value, ServiceMetaInfo.class);
+                })
+                .collect(Collectors.toList());
+        // 写入服务缓存
+        registryServiceCache.writeCache(serviceMetaInfoList);
+        return serviceMetaInfoList;
+    } catch (Exception e) {
+        throw new RuntimeException("获取服务列表失败", e);
+    }
+}
 ```
 
-使用可视化工具观察节点底部的过期时间，当 TTL 到 20 左右的时候，又会重置为 30，说明心跳检测和续期机制正常执行。
-
-```java
-{"serviceName":"myService","serviceVersion":"1.0","serviceAddress":"localhost:1234","serviceGroup":"default"}
-```
-### 服务节点下线机制
-
-当服务提供者节点宕机时，应该从注册中心移除掉已注册的节点，否则会影响消费端调用。所以我们需要设计一套服务节点下线机制。
-
-#### 方案设计
-
-服务节点下线又分为：
-
-- 主动下线：服务提供者项目正常退出时，主动从注册中心移除注册信息。
-- 被动下线：服务提供者项目异常推出时，利用 Etcd 的 key 过期机制自动移除。
-
-被动下线已经可以利用 Etcd 的机制实现了，我们主要开发主动下线。
-
-问题是，怎么在 Java 项目正常退出时，执行某个操作呢？
-
-其实，非常简单，利用 JVM 的 ShutdownHook 就能实现。
-
-JVM 的 ShutdownHook 是 Java 虚拟机提供的一种机制，允许开发者在 JVM 即将关闭之前执行一些清理工作或其他必要的操作，例如关闭数据库连接、释放资源、保存临时数据等。
-
-Spring Boot 也提供了类似的优雅停机能力。
-
-#### 开发实现
-
-1）完善 Etcd 注册中心的 destroy 方法，补充下线节点的逻辑。
-
-代码如下：
-
-```java
-```
-
-2）在 RpcApplication 的 init 方法中，注册 Shutdown Hook，当程序正常退出时会执行注册中心的 destroy 方法。
-
-代码如下：
-
-```java
-```
-
-#### 测试
-
-测试方法很简单：
-
-1. 启动服务提供者，然后观察服务是否成功被注册
-2. 正常停止服务提供者，然后观察服务信息是否被删除
-
-### 消费端服务缓存
-
-正常情况下，服务节点信息列表的更新频率是不高的，所以在服务消费者从注册中心获取到服务节点信息列表后，完全可以 **缓存在本地**，下次就不用再请求注册中心获取了，能够提高性能。
-
-#### 1、增加本地缓存
-
-本地缓存的实现很简单，用一个列表来存储服务信息即可，提供操作列表的基本方法，包括：写缓存、读缓存、清空缓存。
-
-注意，本教程为了大家循序渐进的学习，暂时先只考虑单服务（相同 serviceKey）的缓存。如果要实现多服务缓存，可以改为使用 Map 接口。
-
-在 registry 包下新增缓存类 `RegistryServiceCache`，代码如下：
-
-```java
-```
-
-#### 2、使用本地缓存
-
-1）修改 EtcdRegistry 的代码，使用本地缓存对象：
-
-```java
-```
-
-2）修改服务发现逻辑，优先从缓存获取服务；如果没有缓存，再从注册中心获取，并且设置到缓存中。
-
-代码如下：
-
-```java
-```
-
-#### 3、服务缓存更新 - 监听机制
-
-当服务注册信息发生变更（比如节点下线）时，需要即时更新消费端缓存。
-
-问题是，怎么知道服务注册信息什么时候发生变更呢？
-
-这就需要我们使用 Etcd 的 watch 监听机制，当监听的某个 key 发生修改或删除时，就会触发事件来通知监听者。
-
-如图：
-
-什么时候去创建 watch 监听器呢？
-
-我们首先要明确 watch 监听是服务消费者还是服务提供者执行的。由于我们的目标是更新缓存，缓存是在服务消费端维护和使用的，所以也应该是服务消费端去 watch。
-
-也就是说，只有服务消费者执行的方法中，可以创建 watch 监听器，那么比较合适的位置就是服务发现方法（serviceDiscovery）。可以对本次获取到的所有服务节点 key 进行监听
-
-还需要防止重复监听同一个 key，可以通过定义一个已监听 key 的集合来实现。
-
-下面我们来开发编码。
-
-1）Registry 注册中心接口补充监听 key 的方法，代码如下：
-
-```java
-```
-
-2）EtcdRegistry 类中，新增监听 key 的集合。
-
-可以使用 ConcurrentHashSet 防止并发冲突，代码如下：
-
-```java
-```
-
-3）在 EtcdRegistry 类中实现监听 key 的方法。
-
-通过调用 Etcd 的 WatchClient 实现监听，如果出现了 DELETE key 删除事件，则清理服务注册缓存。
-
-注意，即使 key 在注册中心被删除后再重新设置，之前的监听依旧生效。所以我们只监听首次加入到监听集合的 key，防止重复。
-
-代码如下：
-
-```java
-```
-
-4）在消费端获取服务时调用 watch 方法，对获取到的服务节点 key 进行监听。
-
-修改服务发现方法的代码如下：
-
-```java
-```
 
 5）测试。
 
@@ -377,6 +557,7 @@ Spring Boot 也提供了类似的优雅停机能力。
 ### ZooKeeper 注册中心实现
 
 这部分不作为学习重点，理解了一种注册中心的实现方式，再用其他技术实现注册中心就很简单了。
+看看就好，我也没有写
 
 其实和 Etcd 注册中心的实现方式极其相似，步骤如下：
 
@@ -411,6 +592,196 @@ Spring Boot 也提供了类似的优雅停机能力。
 3）ZooKeeper 注册中心实现，这里不再赘述：
 
 ```java
+package com.rom.romrpc.registry;
+
+import cn.hutool.core.collection.ConcurrentHashSet;
+import com.rom.romrpc.config.RegistryConfig;
+import com.rom.romrpc.model.ServiceMetaInfo;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.curator.framework.CuratorFramework;
+import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.framework.recipes.cache.CuratorCache;
+import org.apache.curator.framework.recipes.cache.CuratorCacheListener;
+import org.apache.curator.retry.ExponentialBackoffRetry;
+import org.apache.curator.x.discovery.ServiceDiscovery;
+import org.apache.curator.x.discovery.ServiceDiscoveryBuilder;
+import org.apache.curator.x.discovery.ServiceInstance;
+import org.apache.curator.x.discovery.details.JsonInstanceSerializer;
+
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+/**
+ * zookeeper 注册中心
+ * 操作文档：<a href="https://curator.apache.org/docs/getting-started">Apache Curator</a>
+ * 代码示例：<a href="https://github.com/apache/curator/blob/master/curator-examples/src/main/java/discovery/DiscoveryExample.java">DiscoveryExample.java</a>
+ * 监听 key 示例：<a href="https://github.com/apache/curator/blob/master/curator-examples/src/main/java/cache/CuratorCacheExample.java">CuratorCacheExample.java</a>
+ *
+ * @author 
+ */
+@Slf4j
+public class ZooKeeperRegistry implements Registry {
+
+    private CuratorFramework client;
+
+    private ServiceDiscovery<ServiceMetaInfo> serviceDiscovery;
+
+    /**
+     * 本机注册的节点 key 集合（用于维护续期）
+     */
+    private final Set<String> localRegisterNodeKeySet = new HashSet<>();
+
+    /**
+     * 注册中心服务缓存
+     */
+    private final RegistryServiceCache registryServiceCache = new RegistryServiceCache();
+
+    /**
+     * 正在监听的 key 集合
+     */
+    private final Set<String> watchingKeySet = new ConcurrentHashSet<>();
+
+    /**
+     * 根节点
+     */
+    private static final String ZK_ROOT_PATH = "/rpc/zk";
+
+
+    @Override
+    public void init(RegistryConfig registryConfig) {
+        // 构建 client 实例
+        client = CuratorFrameworkFactory
+                .builder()
+                .connectString(registryConfig.getAddress())
+                .retryPolicy(new ExponentialBackoffRetry(Math.toIntExact(registryConfig.getTimeout()), 3))
+                .build();
+
+        // 构建 serviceDiscovery 实例
+        serviceDiscovery = ServiceDiscoveryBuilder.builder(ServiceMetaInfo.class)
+                .client(client)
+                .basePath(ZK_ROOT_PATH)
+                .serializer(new JsonInstanceSerializer<>(ServiceMetaInfo.class))
+                .build();
+
+        try {
+            // 启动 client 和 serviceDiscovery
+            client.start();
+            serviceDiscovery.start();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void register(ServiceMetaInfo serviceMetaInfo) throws Exception {
+        // 注册到 zk 里
+        serviceDiscovery.registerService(buildServiceInstance(serviceMetaInfo));
+
+        // 添加节点信息到本地缓存
+        String registerKey = ZK_ROOT_PATH + "/" + serviceMetaInfo.getServiceNodeKey();
+        localRegisterNodeKeySet.add(registerKey);
+    }
+
+    @Override
+    public void unRegister(ServiceMetaInfo serviceMetaInfo) {
+        try {
+            serviceDiscovery.unregisterService(buildServiceInstance(serviceMetaInfo));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        // 从本地缓存移除
+        String registerKey = ZK_ROOT_PATH + "/" + serviceMetaInfo.getServiceNodeKey();
+        localRegisterNodeKeySet.remove(registerKey);
+    }
+
+    @Override
+    public List<ServiceMetaInfo> serviceDiscovery(String serviceKey) {
+        // 优先从缓存获取服务
+        List<ServiceMetaInfo> cachedServiceMetaInfoList = registryServiceCache.readCache();
+        if (cachedServiceMetaInfoList != null) {
+            return cachedServiceMetaInfoList;
+        }
+
+        try {
+            // 查询服务信息
+            Collection<ServiceInstance<ServiceMetaInfo>> serviceInstanceList = serviceDiscovery.queryForInstances(serviceKey);
+
+            // 解析服务信息
+            List<ServiceMetaInfo> serviceMetaInfoList = serviceInstanceList.stream()
+                    .map(ServiceInstance::getPayload)
+                    .collect(Collectors.toList());
+
+            // 写入服务缓存
+            registryServiceCache.writeCache(serviceMetaInfoList);
+            return serviceMetaInfoList;
+        } catch (Exception e) {
+            throw new RuntimeException("获取服务列表失败", e);
+        }
+    }
+
+    @Override
+    public void heartBeat() {
+        // 不需要心跳机制，建立了临时节点，如果服务器故障，则临时节点直接丢失
+    }
+
+    /**
+     * 监听（消费端）
+     *
+     * @param serviceNodeKey 服务节点 key
+     */
+    @Override
+    public void watch(String serviceNodeKey) {
+        String watchKey = ZK_ROOT_PATH + "/" + serviceNodeKey;
+        boolean newWatch = watchingKeySet.add(watchKey);
+        if (newWatch) {
+            CuratorCache curatorCache = CuratorCache.build(client, watchKey);
+            curatorCache.start();
+            curatorCache.listenable().addListener(
+                    CuratorCacheListener
+                            .builder()
+                            .forDeletes(childData -> registryServiceCache.clearCache())
+                            .forChanges(((oldNode, node) -> registryServiceCache.clearCache()))
+                            .build()
+            );
+        }
+    }
+
+    @Override
+    public void destroy() {
+        log.info("当前节点下线");
+        // 下线节点（这一步可以不做，因为都是临时节点，服务下线，自然就被删掉了）
+        for (String key : localRegisterNodeKeySet) {
+            try {
+                client.delete().guaranteed().forPath(key);
+            } catch (Exception e) {
+                throw new RuntimeException(key + "节点下线失败");
+            }
+        }
+
+        // 释放资源
+        if (client != null) {
+            client.close();
+        }
+    }
+
+    private ServiceInstance<ServiceMetaInfo> buildServiceInstance(ServiceMetaInfo serviceMetaInfo) {
+        String serviceAddress = serviceMetaInfo.getServiceHost() + ":" + serviceMetaInfo.getServicePort();
+        try {
+            return ServiceInstance
+                    .<ServiceMetaInfo>builder()
+                    .id(serviceAddress)
+                    .name(serviceMetaInfo.getServiceKey())
+                    .address(serviceAddress)
+                    .payload(serviceMetaInfo)
+                    .build();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
 ```
 
 4）SPI 增加对 ZooKeeper 的支持：
