@@ -10,6 +10,7 @@ import com.rom.romrpc.registry.Registry;
 import com.rom.romrpc.registry.RegistryFactory;
 import com.rom.romrpc.server.HttpServer;
 import com.rom.romrpc.server.VertxHttpServer;
+import com.rom.romrpc.server.tcp.VertxTcpServer;
 
 /**
  * 提供者示例
@@ -40,7 +41,12 @@ public class ProviderExample {
 
 
         // 启动 web 服务
-        HttpServer httpServer = new VertxHttpServer();
-        httpServer.doStart(RpcApplication.getRpcConfig().getServerPort());
+        // HttpServer httpServer = new VertxHttpServer();
+        // httpServer.doStart(RpcApplication.getRpcConfig().getServerPort());
+
+        // 启动 TCP 服务
+        VertxTcpServer vertxTcpServer = new VertxTcpServer();
+        vertxTcpServer.doStart(8080);
+
     }
 }

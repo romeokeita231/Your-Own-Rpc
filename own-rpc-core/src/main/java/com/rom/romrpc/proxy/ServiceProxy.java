@@ -1,13 +1,11 @@
 package com.rom.romrpc.proxy;
 
 import cn.hutool.core.collection.CollUtil;
-import cn.hutool.http.HttpRequest;
-import cn.hutool.http.HttpResponse;
 
-import java.io.IOException;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.util.List;
+
 
 import com.rom.romrpc.RpcApplication;
 import com.rom.romrpc.config.RpcConfig;
@@ -19,6 +17,7 @@ import com.rom.romrpc.registry.Registry;
 import com.rom.romrpc.registry.RegistryFactory;
 import com.rom.romrpc.serializer.Serializer;
 import com.rom.romrpc.serializer.SerializerFactory;
+import com.rom.romrpc.server.tcp.VertxTcpClient;
 
 /**
  * 服务代理（JDK 动态代理）
@@ -51,8 +50,8 @@ public class ServiceProxy implements InvocationHandler {
                 .args(args)
                 .build();
         try {
-            // 序列化
-            byte[] bodyBytes = serializer.serialize(rpcRequest);
+            
+            
 
             // 从注册中心获取服务提供者请求地址
             RpcConfig rpcConfig = RpcApplication.getRpcConfig();
@@ -67,22 +66,13 @@ public class ServiceProxy implements InvocationHandler {
             // 暂时先取第一个
             ServiceMetaInfo selectedServiceMetaInfo = serviceMetaInfoList.get(0);
 
-            // 发送请求
-            try (HttpResponse httpResponse = HttpRequest.post(selectedServiceMetaInfo.getServiceAddress())
-                    .body(bodyBytes)
-                    .execute()) {
-                byte[] result = httpResponse.bodyBytes();
-                // 反序列化
-                RpcResponse rpcResponse = serializer.deserialize(result, RpcResponse.class);
-                return rpcResponse.getData();
-            }
+             // 发送 TCP 请求
+            RpcResponse rpcResponse = VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo);
+            return rpcResponse.getData();
 
-            
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-
-        return null;
+        } catch (Exception e) {
+            throw new RuntimeException("调用失败");
+        }        
     }
 }
 
