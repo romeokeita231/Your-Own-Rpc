@@ -119,6 +119,28 @@
 代码如下：
 
 ```java
+package com.rom.romrpc.loadbalancer;
+
+import java.util.List;
+import java.util.Map;
+
+import com.rom.romrpc.model.ServiceMetaInfo;
+
+/**
+ * 负载均衡器（消费端使用）
+ *
+ */
+public interface LoadBalancer {
+
+    /**
+     * 选择服务调用
+     *
+     * @param requestParams       请求参数
+     * @param serviceMetaInfoList 可用服务列表
+     * @return
+     */
+    ServiceMetaInfo select(Map<String, Object> requestParams, List<ServiceMetaInfo> serviceMetaInfoList);
+}
 ```
 
 2）轮询负载均衡器。
@@ -128,6 +150,40 @@
 代码如下：
 
 ```java
+package com.rom.romrpc.loadbalancer;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import com.rom.romrpc.model.ServiceMetaInfo;
+
+/**
+ * 轮询负载均衡器
+ *
+ */
+public class RoundRobinLoadBalancer implements LoadBalancer {
+
+    /**
+     * 当前轮询的下标
+     */
+    private final AtomicInteger currentIndex = new AtomicInteger(0);
+
+    @Override
+    public ServiceMetaInfo select(Map<String, Object> requestParams, List<ServiceMetaInfo> serviceMetaInfoList) {
+        if (serviceMetaInfoList.isEmpty()) {
+            return null;
+        }
+        // 只有一个服务，无需轮询
+        int size = serviceMetaInfoList.size();
+        if (size == 1) {
+            return serviceMetaInfoList.get(0);
+        }
+        // 取模算法轮询
+        int index = currentIndex.getAndIncrement() % size;
+        return serviceMetaInfoList.get(index);
+    }
+}
 ```
 
 3）随机负载均衡器。
@@ -135,6 +191,35 @@
 使用 Java 自带的 Random 类实现随机选取即可，代码如下：
 
 ```java
+package com.rom.romrpc.loadbalancer;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+
+import com.rom.romrpc.model.ServiceMetaInfo;
+
+/**
+ * 随机负载均衡器
+ *
+ */
+public class RandomLoadBalancer implements LoadBalancer {
+
+    private final Random random = new Random();
+
+    @Override
+    public ServiceMetaInfo select(Map<String, Object> requestParams, List<ServiceMetaInfo> serviceMetaInfoList) {
+        int size = serviceMetaInfoList.size();
+        if (size == 0) {
+            return null;
+        }
+        // 只有 1 个服务，不用随机
+        if (size == 1) {
+            return serviceMetaInfoList.get(0);
+        }
+        return serviceMetaInfoList.get(random.nextInt(size));
+    }
+}
 ```
 
 4）实现一致性 Hash 负载均衡器。
@@ -144,6 +229,67 @@
 代码如下：
 
 ```java
+package com.rom.romrpc.loadbalancer;
+
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+
+import com.rom.romrpc.model.ServiceMetaInfo;
+
+/**
+ * 一致性哈希负载均衡器
+ *
+ */
+public class ConsistentHashLoadBalancer implements LoadBalancer {
+
+    /**
+     * 一致性 Hash 环，存放虚拟节点
+     */
+    private final TreeMap<Integer, ServiceMetaInfo> virtualNodes = new TreeMap<>();
+
+    /**
+     * 虚拟节点数
+     */
+    private static final int VIRTUAL_NODE_NUM = 100;
+
+    @Override
+    public ServiceMetaInfo select(Map<String, Object> requestParams, List<ServiceMetaInfo> serviceMetaInfoList) {
+        if (serviceMetaInfoList.isEmpty()) {
+            return null;
+        }
+
+        // 构建虚拟节点环
+        for (ServiceMetaInfo serviceMetaInfo : serviceMetaInfoList) {
+            for (int i = 0; i < VIRTUAL_NODE_NUM; i++) {
+                int hash = getHash(serviceMetaInfo.getServiceAddress() + "#" + i);
+                virtualNodes.put(hash, serviceMetaInfo);
+            }
+        }
+
+        // 获取调用请求的 hash 值
+        int hash = getHash(requestParams);
+
+        // 选择最接近且大于等于调用请求 hash 值的虚拟节点
+        Map.Entry<Integer, ServiceMetaInfo> entry = virtualNodes.ceilingEntry(hash);
+        if (entry == null) {
+            // 如果没有大于等于调用请求 hash 值的虚拟节点，则返回环首部的节点
+            entry = virtualNodes.firstEntry();
+        }
+        return entry.getValue();
+    }
+
+
+    /**
+     * Hash 算法，可自行实现
+     *
+     * @param key
+     * @return
+     */
+    private int getHash(Object key) {
+        return key.hashCode();
+    }
+}
 ```
 
 上述代码中，注意两点：
@@ -166,6 +312,24 @@
 代码如下：
 
 ```java
+package com.rom.romrpc.loadbalancer;
+
+/**
+ * 负载均衡器键名常量
+ *
+ */
+public interface LoadBalancerKeys {
+
+    /**
+     * 轮询
+     */
+    String ROUND_ROBIN = "roundRobin";
+
+    String RANDOM = "random";
+
+    String CONSISTENT_HASH = "consistentHash";
+
+}
 ```
 
 2）使用工厂模式，支持根据 key 从 SPI 获取负载均衡器对象实例。
@@ -173,6 +337,36 @@
 在 loadbalancer 包下新建 LoadBalancerFactory 类，代码如下：
 
 ```java
+package com.rom.romrpc.loadbalancer;
+
+import com.rom.romrpc.spi.SpiLoader;
+
+/**
+ * 负载均衡器工厂（工厂模式，用于获取负载均衡器对象）
+ *
+ */
+public class LoadBalancerFactory {
+
+    static {
+        SpiLoader.load(LoadBalancer.class);
+    }
+
+    /**
+     * 默认负载均衡器
+     */
+    private static final LoadBalancer DEFAULT_LOAD_BALANCER = new RoundRobinLoadBalancer();
+
+    /**
+     * 获取实例
+     *
+     * @param key
+     * @return
+     */
+    public static LoadBalancer getInstance(String key) {
+        return SpiLoader.getInstance(LoadBalancer.class, key);
+    }
+
+}
 ```
 
 这个类可以直接复制之前的 SerializerFactory，然后略做修改。可以发现，只要跑通了一次 SPI 机制，后续的开发就很简单了~
@@ -184,11 +378,21 @@
 代码如下：
 
 ```java
+roundRobin=com.yupi.yurpc.loadbalancer.RoundRobinLoadBalancer
+random=com.yupi.yurpc.loadbalancer.RandomLoadBalancer
+consistentHash=com.yupi.yurpc.loadbalancer.ConsistentHashLoadBalancer
 ```
 
 4）为 RpcConfig 全局配置新增负载均衡器的配置，代码如下：
 
 ```java
+@Data
+public class RpcConfig {
+    /**
+     * 负载均衡器
+     */
+    private String loadBalancer = LoadBalancerKeys.ROUND_ROBIN;
+}
 ```
 
 ### 3、应用负载均衡器
@@ -198,6 +402,68 @@
 修改后的代码如下：
 
 ```java
+/**
+ * 服务代理（JDK 动态代理）
+ */
+public class ServiceProxy implements InvocationHandler {
+
+    /**
+     * 调用代理
+     *
+     * @return
+     * @throws Throwable
+     */
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        // 过滤 Object 类的方法（toString、hashCode、equals 等）
+        if (method.getDeclaringClass() == Object.class) {
+            return method.invoke(this, args);
+        }
+
+        // 指定序列化器
+        final Serializer serializer = SerializerFactory.getInstance(RpcApplication.getRpcConfig().getSerializer());
+
+
+        // 构造请求
+        String serviceName = method.getDeclaringClass().getName();
+        RpcRequest rpcRequest = RpcRequest.builder()
+                .serviceName(serviceName)
+                .methodName(method.getName())
+                .parameterTypes(method.getParameterTypes())
+                .args(args)
+                .build();
+        try {
+            
+            
+
+            // 从注册中心获取服务提供者请求地址
+            RpcConfig rpcConfig = RpcApplication.getRpcConfig();
+            Registry registry = RegistryFactory.getInstance(rpcConfig.getRegistryConfig().getRegistry());
+            ServiceMetaInfo serviceMetaInfo = new ServiceMetaInfo();
+            serviceMetaInfo.setServiceName(serviceName);
+            serviceMetaInfo.setServiceVersion(RpcConstant.DEFAULT_SERVICE_VERSION);
+            List<ServiceMetaInfo> serviceMetaInfoList = registry.serviceDiscovery(serviceMetaInfo.getServiceKey());
+            if (CollUtil.isEmpty(serviceMetaInfoList)) {
+                throw new RuntimeException("暂无服务地址");
+            }
+
+            // 负载均衡
+            LoadBalancer loadBalancer = LoadBalancerFactory.getInstance(rpcConfig.getLoadBalancer());
+            // 将调用方法名（请求路径）作为负载均衡参数
+            Map<String, Object> requestParams = new HashMap<>();
+            requestParams.put("methodName", rpcRequest.getMethodName());
+            ServiceMetaInfo selectedServiceMetaInfo = loadBalancer.select(requestParams, serviceMetaInfoList);
+            
+            // rpc 请求
+            RpcResponse rpcResponse = VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo);
+            return rpcResponse.getData();
+
+
+        } catch (Exception e) {
+            throw new RuntimeException("调用失败");
+        }        
+    }
+}
 ```
 
 上述代码中，我们给负载均衡器传入了一个 requestParams HashMap，并且将请求方法名作为参数放到了 Map 中。如果使用的是一致性 Hash 算法，那么会根据 requestParams 计算 Hash 值，调用相同方法的请求 Hash 值肯定相同，所以总会请求到同一个服务器节点上。
@@ -209,6 +475,54 @@
 首先编写单元测试类 LoadBalancerTest，代码如下：
 
 ```java
+package com.rom.romrpc.loadbalancer;
+
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import com.rom.romrpc.model.ServiceMetaInfo;
+
+/**
+ * 负载均衡器测试
+ */
+public class LoadBalancerTest {
+
+    final LoadBalancer loadBalancer = new ConsistentHashLoadBalancer();
+
+    @Test
+    public void select() {
+        // 请求参数
+        Map<String, Object> requestParams = new HashMap<>();
+        requestParams.put("methodName", "apple");
+        // 服务列表
+        ServiceMetaInfo serviceMetaInfo1 = new ServiceMetaInfo();
+        serviceMetaInfo1.setServiceName("myService");
+        serviceMetaInfo1.setServiceVersion("1.0");
+        serviceMetaInfo1.setServiceHost("localhost");
+        serviceMetaInfo1.setServicePort(1234);
+        ServiceMetaInfo serviceMetaInfo2 = new ServiceMetaInfo();
+        serviceMetaInfo2.setServiceName("myService");
+        serviceMetaInfo2.setServiceVersion("1.0");
+        serviceMetaInfo2.setServiceHost("yupi.icu");
+        serviceMetaInfo2.setServicePort(80);
+        List<ServiceMetaInfo> serviceMetaInfoList = Arrays.asList(serviceMetaInfo1, serviceMetaInfo2);
+        // 连续调用 3 次
+        ServiceMetaInfo serviceMetaInfo = loadBalancer.select(requestParams, serviceMetaInfoList);
+        System.out.println(serviceMetaInfo);
+        Assertions.assertNotNull(serviceMetaInfo);
+        serviceMetaInfo = loadBalancer.select(requestParams, serviceMetaInfoList);
+        System.out.println(serviceMetaInfo);
+        Assertions.assertNotNull(serviceMetaInfo);
+        serviceMetaInfo = loadBalancer.select(requestParams, serviceMetaInfoList);
+        System.out.println(serviceMetaInfo);
+        Assertions.assertNotNull(serviceMetaInfo);
+    }
+}
 ```
 
 可以替换 loadBalancer 对象为不同的负载均衡器实现类，然后观察效果。
