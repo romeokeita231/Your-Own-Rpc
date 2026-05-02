@@ -8,8 +8,7 @@ import com.rom.romrpc.model.ServiceMetaInfo;
 import com.rom.romrpc.registry.LocalRegistry;
 import com.rom.romrpc.registry.Registry;
 import com.rom.romrpc.registry.RegistryFactory;
-import com.rom.romrpc.server.HttpServer;
-import com.rom.romrpc.server.VertxHttpServer;
+
 import com.rom.romrpc.server.tcp.VertxTcpServer;
 
 /**

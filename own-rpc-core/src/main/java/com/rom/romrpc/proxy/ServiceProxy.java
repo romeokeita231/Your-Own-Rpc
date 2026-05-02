@@ -11,6 +11,8 @@ import java.util.Map;
 import com.rom.romrpc.RpcApplication;
 import com.rom.romrpc.config.RpcConfig;
 import com.rom.romrpc.constant.RpcConstant;
+import com.rom.romrpc.fault.retry.RetryStrategy;
+import com.rom.romrpc.fault.retry.RetryStrategyFactory;
 import com.rom.romrpc.loadbalancer.LoadBalancer;
 import com.rom.romrpc.loadbalancer.LoadBalancerFactory;
 import com.rom.romrpc.model.RpcRequest;
@@ -75,7 +77,12 @@ public class ServiceProxy implements InvocationHandler {
             ServiceMetaInfo selectedServiceMetaInfo = loadBalancer.select(requestParams, serviceMetaInfoList);
             
             // rpc 请求
-            RpcResponse rpcResponse = VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo);
+            // 使用重试机制
+            RetryStrategy retryStrategy = RetryStrategyFactory.getInstance(rpcConfig.getRetryStrategy());
+
+            RpcResponse rpcResponse = retryStrategy.doRetry(() ->
+                    VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo)
+            );
             return rpcResponse.getData();
 
 

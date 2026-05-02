@@ -85,9 +85,16 @@
 回归到我们的 RPC 框架，消费者发起调用的代码如下：
 
 ```java
+try {
+    // rpc 请求
+    RpcResponse rpcResponse = VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo);
+    return rpcResponse.getData();
+} catch (Exception e) {
+    throw new RuntimeException("调用失败");
+}
 ```
 
-我们完全可以将 VertxTcpClient.doRequest 封装为一个可重试的任务，如果请求失败（重试条件），系统就会自动按照重试策略再次发起请求，不用开发者关心。
+我们完全可以将 `VertxTcpClient.doRequest` 封装为一个可重试的任务，如果请求失败（重试条件），系统就会自动按照重试策略再次发起请求，不用开发者关心。
 
 对于重试算法，我们就选择主流的重试算法好了，Java 中可以使用 Guava-Retrying 库轻松实现多种不同的重试算法，非常简单，后文直接带大家实战。
 
@@ -112,11 +119,38 @@
 代码如下：
 
 ```java
+package com.rom.romrpc.fault.retry;
+
+import java.util.concurrent.Callable;
+
+import com.rom.romrpc.model.RpcResponse;
+
+/**
+ * 重试策略
+ *
+ */
+public interface RetryStrategy {
+
+    /**
+     * 重试
+     *
+     * @param callable
+     * @return
+     * @throws Exception
+     */
+    RpcResponse doRetry(Callable<RpcResponse> callable) throws Exception;
+}
 ```
 
 2）引入 Guava-Retrying 重试库，代码如下：
 
 ```java
+<!-- https://github.com/rholder/guava-retrying -->
+<dependency>
+    <groupId>com.github.rholder</groupId>
+    <artifactId>guava-retrying</artifactId>
+    <version>2.0.0</version>
+</dependency>
 ```
 
 3）不重试策略实现。
@@ -124,6 +158,33 @@
 就是直接执行一次任务，代码如下：
 
 ```java
+package com.rom.romrpc.fault.retry;
+
+import java.util.concurrent.Callable;
+
+import com.rom.romrpc.model.RpcResponse;
+
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * 不重试 - 重试策略
+ *
+ */
+@Slf4j
+public class NoRetryStrategy implements RetryStrategy {
+
+    /**
+     * 重试
+     *
+     * @param callable
+     * @return
+     * @throws Exception
+     */
+    public RpcResponse doRetry(Callable<RpcResponse> callable) throws Exception {
+        return callable.call();
+    }
+
+}
 ```
 
 4）固定重试间隔策略实现。
@@ -133,6 +194,53 @@
 代码如下：
 
 ```java
+package com.rom.romrpc.fault.retry;
+
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+
+import com.github.rholder.retry.Attempt;
+import com.github.rholder.retry.RetryException;
+import com.github.rholder.retry.RetryListener;
+import com.github.rholder.retry.Retryer;
+import com.github.rholder.retry.RetryerBuilder;
+import com.github.rholder.retry.StopStrategies;
+import com.github.rholder.retry.WaitStrategies;
+import com.rom.romrpc.model.RpcResponse;
+
+import lombok.extern.slf4j.Slf4j;
+
+/**
+ * 固定时间间隔 - 重试策略
+ *
+ */
+@Slf4j
+public class FixedIntervalRetryStrategy implements RetryStrategy {
+
+    /**
+     * 重试
+     *
+     * @param callable
+     * @return
+     * @throws ExecutionException
+     * @throws RetryException
+     */
+    public RpcResponse doRetry(Callable<RpcResponse> callable) throws ExecutionException, RetryException {
+        Retryer<RpcResponse> retryer = RetryerBuilder.<RpcResponse>newBuilder()
+                .retryIfExceptionOfType(Exception.class)
+                .withWaitStrategy(WaitStrategies.fixedWait(3L, TimeUnit.SECONDS))
+                .withStopStrategy(StopStrategies.stopAfterAttempt(3))
+                .withRetryListener(new RetryListener() {
+                    @Override
+                    public <V> void onRetry(Attempt<V> attempt) {
+                        log.info("重试次数 {}", attempt.getAttemptNumber());
+                    }
+                })
+                .build();
+        return retryer.call(callable);
+    }
+}
 ```
 
 上述代码中，重试策略如下：
@@ -147,6 +255,33 @@
 单元测试代码如下：
 
 ```java
+package com.rom.romrpc.fault.retry;
+
+import org.junit.jupiter.api.Test;
+
+import com.rom.romrpc.model.RpcResponse;
+
+/**
+ * 重试策略测试
+ */
+public class RetryStrategyTest {
+
+    RetryStrategy retryStrategy = new NoRetryStrategy();
+
+    @Test
+    public void doRetry() {
+        try {
+            RpcResponse rpcResponse = retryStrategy.doRetry(() -> {
+                System.out.println("测试重试");
+                throw new RuntimeException("模拟重试失败");
+            });
+            System.out.println(rpcResponse);
+        } catch (Exception e) {
+            System.out.println("重试多次失败");
+            e.printStackTrace();
+        }
+    }
+}
 ```
 
 ### 2、支持配置和扩展重试策略
@@ -162,6 +297,25 @@
 代码如下：
 
 ```java
+package com.rom.romrpc.fault.retry;
+
+/**
+ * 重试策略键名常量
+ *
+ */
+public interface RetryStrategyKeys {
+
+    /**
+     * 不重试
+     */
+    String NO = "no";
+
+    /**
+     * 固定时间间隔
+     */
+    String FIXED_INTERVAL = "fixedInterval";
+
+}
 ```
 
 2）使用工厂模式，支持根据 key 从 SPI 获取重试策略对象实例。
@@ -169,6 +323,36 @@
 在 fault.retry 包下新建 RetryStrategyFactory 类，代码如下：
 
 ```java
+package com.rom.romrpc.fault.retry;
+
+import com.rom.romrpc.spi.SpiLoader;
+
+/**
+ * 重试策略工厂（用于获取重试器对象）
+ *
+ */
+public class RetryStrategyFactory {
+
+    static {
+        SpiLoader.load(RetryStrategy.class);
+    }
+
+    /**
+     * 默认重试器
+     */
+    private static final RetryStrategy DEFAULT_RETRY_STRATEGY = new NoRetryStrategy();
+
+    /**
+     * 获取实例
+     *
+     * @param key
+     * @return
+     */
+    public static RetryStrategy getInstance(String key) {
+        return SpiLoader.getInstance(RetryStrategy.class, key);
+    }
+
+}
 ```
 
 这个类可以直接复制之前的 SerializerFactory，然后略做修改。可以发现，只要跑通了一次 SPI 机制，后续的开发就很简单了~
@@ -203,6 +387,11 @@ public class RpcConfig {
 修改的代码如下：
 
 ```java
+// 使用重试机制
+RetryStrategy retryStrategy = RetryStrategyFactory.getInstance(rpcConfig.getRetryStrategy());
+RpcResponse rpcResponse = retryStrategy.doRetry(() ->
+        VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo)
+);
 ```
 
 上述代码中，使用 Lambda 表达式将 VertxTcpClient.doRequest 封装为了一个匿名函数，简化了代码。
@@ -210,6 +399,47 @@ public class RpcConfig {
 修改后的 ServiceProxy 的完整代码如下：
 
 ```java
+/**
+ * 服务代理（JDK 动态代理）
+ */
+public class ServiceProxy implements InvocationHandler {
+
+    /**
+     * 调用代理
+     *
+     * @return
+     * @throws Throwable
+     */
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        // 过滤 Object 类的方法（toString、hashCode、equals 等）
+        ···
+        // 指定序列化器
+        ···
+        // 构造请求
+        ···
+        try {
+            // 从注册中心获取服务提供者请求地址
+            ···
+            // 负载均衡
+            ···
+            // 将调用方法名（请求路径）作为负载均衡参数
+            ···
+            
+            // rpc 请求
+            // 使用重试机制
+            RetryStrategy retryStrategy = RetryStrategyFactory.getInstance(rpcConfig.getRetryStrategy());
+
+            RpcResponse rpcResponse = retryStrategy.doRetry(() ->
+                    VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo)
+            );
+            return rpcResponse.getData();
+
+        } catch (Exception e) {
+            throw new RuntimeException("调用失败");
+        }        
+    }
+}
 ```
 
 我们会发现，即使引入了重试机制，整段代码并没有变得更复杂，这就是可扩展性设计的巧妙之处。
