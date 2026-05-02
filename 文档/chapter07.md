@@ -1040,22 +1040,6 @@ byte[] bodyBytes = buffer.getBytes(17, 17 + header.getBodyLength());
 1）先小试牛刀，使用 RecordParser 来读取固定长度的消息，示例代码如下：
 
 ```java
-```
-
-上述代码的核心是 RecordParser.newFixed(messageLength)，为 Parser 指定每次读取固定值长度的内容。
-
-测试发现，这次的输出结果非常整齐，解决了半包和粘包：
-
-2）实际运用中，消息体的长度是不固定的，所以要通过调整 RecordParser 的固定长度（变长）来解决。
-
-那我们的思路可以是，将读取完整的消息拆分为 2 次：
-
-1. 先完整读取请求头信息，由于请求头信息长度是固定的，可以使用 RecordParser 保证每次都完整读取。
-2. 再根据请求头长度信息更改 RecordParser 的固定长度，保证完整获取到请求体。
-
-修改测试 TCP Server 代码如下：
-
-```java
 public class VertxTcpServer implements HttpServer {
 
     @Override
@@ -1082,6 +1066,80 @@ public class VertxTcpServer implements HttpServer {
                     System.out.println(str);
                     if (testMessage.equals(str)) {
                         System.out.println("good");
+                    }
+                }
+            });
+
+            socket.handler(parser);
+        });
+
+        // 启动 TCP 服务器并监听指定端口
+        server.listen(port, result -> {
+            if (result.succeeded()) {
+                log.info("TCP server started on port " + port);
+            } else {
+                log.info("Failed to start TCP server: " + result.cause());
+            }
+        });
+    }
+
+    public static void main(String[] args) {
+        new VertxTcpServer().doStart(8888);
+    }
+}
+```
+
+上述代码的核心是 RecordParser.newFixed(messageLength)，为 Parser 指定每次读取固定值长度的内容。
+
+测试发现，这次的输出结果非常整齐，解决了半包和粘包：
+
+2）实际运用中，消息体的长度是不固定的，所以要通过调整 RecordParser 的固定长度（变长）来解决。
+
+那我们的思路可以是，将读取完整的消息拆分为 2 次：
+
+1. 先完整读取请求头信息，由于请求头信息长度是固定的，可以使用 RecordParser 保证每次都完整读取。
+2. 再根据请求头长度信息更改 RecordParser 的固定长度，保证完整获取到请求体。
+
+修改测试 TCP Server 代码如下：
+
+```java
+@Slf4j
+public class VertxTcpServer implements HttpServer {
+
+    @Override
+    public void doStart(int port) {
+        // 创建 Vert.x 实例
+        Vertx vertx = Vertx.vertx();
+
+        // 创建 TCP 服务器
+        NetServer server = vertx.createNetServer();
+
+        // 处理请求
+        server.connectHandler(socket -> {
+            // 构造 parser
+            RecordParser parser = RecordParser.newFixed(8);
+            parser.setOutput(new Handler<Buffer>() {
+                // 初始化
+                int size = -1;
+                // 一次完整的读取（头 + 体）
+                Buffer resultBuffer = Buffer.buffer();
+
+                @Override
+                public void handle(Buffer buffer) {
+                    if (-1 == size) {
+                        // 读取消息体长度
+                        size = buffer.getInt(4);
+                        parser.fixedSizeMode(size);
+                        // 写入头信息到结果
+                        resultBuffer.appendBuffer(buffer);
+                    } else {
+                        // 写入体信息到结果
+                        resultBuffer.appendBuffer(buffer);
+                        System.out.println(resultBuffer.toString());
+                        // 重置一轮
+                        parser.fixedSizeMode(8);
+                        size = -1;
+                        resultBuffer = Buffer.buffer();
                     }
                 }
             });

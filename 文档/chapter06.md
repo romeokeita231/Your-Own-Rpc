@@ -787,8 +787,8 @@ public class ZooKeeperRegistry implements Registry {
 4）SPI 增加对 ZooKeeper 的支持：
 
 ```java
-etcd=com.yupi.yurpc.registry.EtcdRegistry
-zookeeper=com.yupi.yurpc.registry.ZooKeeperRegistry
+etcd=com.rom.romrpc.registry.EtcdRegistry
+zookeeper=com.rom.romrpc.registry.ZooKeeperRegistry
 ```
 写入system/com.rom.romrpc.registry.Registry
 

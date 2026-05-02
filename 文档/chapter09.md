@@ -364,8 +364,8 @@ public class RetryStrategyFactory {
 代码如下：
 
 ```java
-no=com.yupi.yurpc.fault.retry.NoRetryStrategy
-fixedInterval=com.yupi.yurpc.fault.retry.FixedIntervalRetryStrategy
+no=com.rom.romrpc.fault.retry.NoRetryStrategy
+fixedInterval=com.rom.romrpc.fault.retry.FixedIntervalRetryStrategy
 ```
 
 4）为 RpcConfig 全局配置新增重试策略的配置，代码如下：

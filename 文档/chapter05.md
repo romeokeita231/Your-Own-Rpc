@@ -742,7 +742,7 @@ public class RegistryFactory {
 
 这个类可以直接复制之前的 SerializerFactory，然后略做修改。可以发现，只要跑通了 SPI 机制，后续的开发就很简单了~
 
-3）在 `META-INF` 的 `rpc/system` 目录下编写注册中心接口的 SPI 配置文件，文件名称为 `com.yupi.yurpc.registry.Registry`。
+3）在 `META-INF` 的 `rpc/system` 目录下编写注册中心接口的 SPI 配置文件，文件名称为 `com.rom.romrpc.registry.Registry`。
 
 system/com.rom.romrpc.registry.Registry
 

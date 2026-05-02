@@ -108,6 +108,17 @@
 代码如下：
 
 ```java
+/**
+ * 快速失败 - 容错策略（立刻通知外层调用方）
+ *
+ */
+public class FailFastTolerantStrategy implements TolerantStrategy {
+
+    @Override
+    public RpcResponse doTolerant(Map<String, Object> context, Exception e) {
+        throw new RuntimeException("服务报错", e);
+    }
+}
 ```
 
 3）静默处理容错策略实现。
@@ -117,15 +128,57 @@
 代码如下：
 
 ```java
+/**
+ * 静默处理异常 - 容错策略
+ *
+ */
+@Slf4j
+public class FailSafeTolerantStrategy implements TolerantStrategy {
+
+    @Override
+    public RpcResponse doTolerant(Map<String, Object> context, Exception e) {
+        log.info("静默处理异常", e);
+        return new RpcResponse();
+    }
+}
 ```
 
 4）其他容错策略。
 
 还可以自行实现更多的容错策略，比如 FailBackTolerantStrategy 故障恢复策略：
 
+```java
+/**
+ * 降级到其他服务 - 容错策略
+ *
+ */
+@Slf4j
+public class FailBackTolerantStrategy implements TolerantStrategy {
+
+    @Override
+    public RpcResponse doTolerant(Map<String, Object> context, Exception e) {
+        // todo 可自行扩展，获取降级的服务并调用
+        return null;
+    }
+}
+```
+
 还有 FailOverTolerantStrategy 故障转移策略：
 
 ```java
+/**
+ * 转移到其他服务节点 - 容错策略
+ *
+ */
+@Slf4j
+public class FailOverTolerantStrategy implements TolerantStrategy {
+
+    @Override
+    public RpcResponse doTolerant(Map<String, Object> context, Exception e) {
+        // todo 可自行扩展，获取其他服务节点并调用
+        return null;
+    }
+}
 ```
 
 当前的容错机制目录如下：
@@ -155,18 +208,76 @@ own-rpc-core/
 
 1）容错策略常量。
 
-在 fault.tolerant 包下新建 TolerantStrategyKeys 类，列举所有支持的容错策略键名。
+在 `fault.tolerant` 包下新建 `TolerantStrategyKeys` 类，列举所有支持的容错策略键名。
 
 代码如下：
 
 ```java
+package com.rom.romrpc.fault.tolerant;
+
+/**
+ * 容错策略键名常量
+ *
+ */
+public interface TolerantStrategyKeys {
+
+    /**
+     * 故障恢复
+     */
+    String FAIL_BACK = "failBack";
+
+    /**
+     * 快速失败
+     */
+    String FAIL_FAST = "failFast";
+
+    /**
+     * 故障转移
+     */
+    String FAIL_OVER = "failOver";
+
+    /**
+     * 静默处理
+     */
+    String FAIL_SAFE = "failSafe";
+
+}
 ```
 
 2）使用工厂模式，支持根据 key 从 SPI 获取容错策略对象实例。
 
-在 fault.tolerant 包下新建 TolerantStrategyFactory 类，代码如下：
+在 `fault.tolerant` 包下新建 `TolerantStrategyFactory` 类，代码如下：
 
 ```java
+package com.rom.romrpc.fault.tolerant;
+
+import com.rom.romrpc.spi.SpiLoader;
+
+/**
+ * 容错策略工厂（工厂模式，用于获取容错策略对象）
+ *
+ */
+public class TolerantStrategyFactory {
+
+    static {
+        SpiLoader.load(TolerantStrategy.class);
+    }
+
+    /**
+     * 默认容错策略
+     */
+    private static final TolerantStrategy DEFAULT_RETRY_STRATEGY = new FailFastTolerantStrategy();
+
+    /**
+     * 获取实例
+     *
+     * @param key
+     * @return
+     */
+    public static TolerantStrategy getInstance(String key) {
+        return SpiLoader.getInstance(TolerantStrategy.class, key);
+    }
+}
 ```
 
 这个类可以直接复制之前的 SerializerFactory，然后略做修改。可以发现，只要跑通了一次 SPI 机制，后续的开发就很简单了~
@@ -177,10 +288,10 @@ own-rpc-core/
 代码如下：
 
 ```java
-failBack=com.yupi.yurpc.fault.tolerant.FailBackTolerantStrategy
-failFast=com.yupi.yurpc.fault.tolerant.FailFastTolerantStrategy
-failOver=com.yupi.yurpc.fault.tolerant.FailOverTolerantStrategy
-failSafe=com.yupi.yurpc.fault.tolerant.FailSafeTolerantStrategy
+failBack=com.rom.romrpc.fault.tolerant.FailBackTolerantStrategy
+failFast=com.rom.romrpc.fault.tolerant.FailFastTolerantStrategy
+failOver=com.rom.romrpc.fault.tolerant.FailOverTolerantStrategy
+failSafe=com.rom.romrpc.fault.tolerant.FailSafeTolerantStrategy
 ```
 
 4）为 RpcConfig 全局配置新增容错策略的配置，代码如下：
@@ -202,11 +313,95 @@ public class RpcConfig {
 修改的代码如下：
 
 ```java
+// rpc 请求
+// 使用重试机制
+RpcResponse rpcResponse;
+try {
+    RetryStrategy retryStrategy = RetryStrategyFactory.getInstance(rpcConfig.getRetryStrategy());
+    rpcResponse = retryStrategy.doRetry(() ->
+            VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo)
+    );
+} catch (Exception e) {
+    // 容错机制
+    TolerantStrategy tolerantStrategy = TolerantStrategyFactory.getInstance(rpcConfig.getTolerantStrategy());
+    rpcResponse = tolerantStrategy.doTolerant(null, e);
+}
+return rpcResponse.getData();
 ```
 
 修改后的 ServiceProxy 的完整代码如下：
 
 ```java
+/**
+ * 服务代理（JDK 动态代理）
+ */
+public class ServiceProxy implements InvocationHandler {
+
+    /**
+     * 调用代理
+     *
+     * @return
+     * @throws Throwable
+     */
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        // 过滤 Object 类的方法（toString、hashCode、equals 等）
+        if (method.getDeclaringClass() == Object.class) {
+            return method.invoke(this, args);
+        }
+
+
+        // 构造请求
+        String serviceName = method.getDeclaringClass().getName();
+        RpcRequest rpcRequest = RpcRequest.builder()
+                .serviceName(serviceName)
+                .methodName(method.getName())
+                .parameterTypes(method.getParameterTypes())
+                .args(args)
+                .build();
+        try {
+            
+            
+
+            // 从注册中心获取服务提供者请求地址
+            RpcConfig rpcConfig = RpcApplication.getRpcConfig();
+            Registry registry = RegistryFactory.getInstance(rpcConfig.getRegistryConfig().getRegistry());
+            ServiceMetaInfo serviceMetaInfo = new ServiceMetaInfo();
+            serviceMetaInfo.setServiceName(serviceName);
+            serviceMetaInfo.setServiceVersion(RpcConstant.DEFAULT_SERVICE_VERSION);
+            List<ServiceMetaInfo> serviceMetaInfoList = registry.serviceDiscovery(serviceMetaInfo.getServiceKey());
+            if (CollUtil.isEmpty(serviceMetaInfoList)) {
+                throw new RuntimeException("暂无服务地址");
+            }
+
+            // 负载均衡
+            LoadBalancer loadBalancer = LoadBalancerFactory.getInstance(rpcConfig.getLoadBalancer());
+            // 将调用方法名（请求路径）作为负载均衡参数
+            Map<String, Object> requestParams = new HashMap<>();
+            requestParams.put("methodName", rpcRequest.getMethodName());
+            ServiceMetaInfo selectedServiceMetaInfo = loadBalancer.select(requestParams, serviceMetaInfoList);
+            
+            // rpc 请求
+            // 使用重试机制
+            RpcResponse rpcResponse;
+            try {
+                RetryStrategy retryStrategy = RetryStrategyFactory.getInstance(rpcConfig.getRetryStrategy());
+                rpcResponse = retryStrategy.doRetry(() ->
+                        VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo)
+                );
+            } catch (Exception e) {
+                // 容错机制
+                TolerantStrategy tolerantStrategy = TolerantStrategyFactory.getInstance(rpcConfig.getTolerantStrategy());
+                rpcResponse = tolerantStrategy.doTolerant(null, e);
+            }
+            return rpcResponse.getData();
+
+
+        } catch (Exception e) {
+            throw new RuntimeException("调用失败");
+        }        
+    }
+}
 ```
 
 我们会发现，即使引入了容错机制，整段代码并没有变得更复杂，这就是可扩展性设计的巧妙之处。

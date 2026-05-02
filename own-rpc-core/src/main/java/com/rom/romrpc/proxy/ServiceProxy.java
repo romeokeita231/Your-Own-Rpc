@@ -13,6 +13,8 @@ import com.rom.romrpc.config.RpcConfig;
 import com.rom.romrpc.constant.RpcConstant;
 import com.rom.romrpc.fault.retry.RetryStrategy;
 import com.rom.romrpc.fault.retry.RetryStrategyFactory;
+import com.rom.romrpc.fault.tolerant.TolerantStrategy;
+import com.rom.romrpc.fault.tolerant.TolerantStrategyFactory;
 import com.rom.romrpc.loadbalancer.LoadBalancer;
 import com.rom.romrpc.loadbalancer.LoadBalancerFactory;
 import com.rom.romrpc.model.RpcRequest;
@@ -20,8 +22,6 @@ import com.rom.romrpc.model.RpcResponse;
 import com.rom.romrpc.model.ServiceMetaInfo;
 import com.rom.romrpc.registry.Registry;
 import com.rom.romrpc.registry.RegistryFactory;
-import com.rom.romrpc.serializer.Serializer;
-import com.rom.romrpc.serializer.SerializerFactory;
 import com.rom.romrpc.server.tcp.VertxTcpClient;
 
 /**
@@ -41,9 +41,6 @@ public class ServiceProxy implements InvocationHandler {
         if (method.getDeclaringClass() == Object.class) {
             return method.invoke(this, args);
         }
-
-        // 指定序列化器
-        final Serializer serializer = SerializerFactory.getInstance(RpcApplication.getRpcConfig().getSerializer());
 
 
         // 构造请求
@@ -78,11 +75,17 @@ public class ServiceProxy implements InvocationHandler {
             
             // rpc 请求
             // 使用重试机制
-            RetryStrategy retryStrategy = RetryStrategyFactory.getInstance(rpcConfig.getRetryStrategy());
-
-            RpcResponse rpcResponse = retryStrategy.doRetry(() ->
-                    VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo)
-            );
+            RpcResponse rpcResponse;
+            try {
+                RetryStrategy retryStrategy = RetryStrategyFactory.getInstance(rpcConfig.getRetryStrategy());
+                rpcResponse = retryStrategy.doRetry(() ->
+                        VertxTcpClient.doRequest(rpcRequest, selectedServiceMetaInfo)
+                );
+            } catch (Exception e) {
+                // 容错机制
+                TolerantStrategy tolerantStrategy = TolerantStrategyFactory.getInstance(rpcConfig.getTolerantStrategy());
+                rpcResponse = tolerantStrategy.doTolerant(null, e);
+            }
             return rpcResponse.getData();
 
 

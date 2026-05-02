@@ -1,6 +1,7 @@
 package com.rom.romrpc.config;
 
 import com.rom.romrpc.fault.retry.RetryStrategyKeys;
+import com.rom.romrpc.fault.tolerant.TolerantStrategyKeys;
 import com.rom.romrpc.loadbalancer.LoadBalancerKeys;
 import com.rom.romrpc.serializer.SerializerKeys;
 
@@ -56,4 +57,9 @@ public class RpcConfig {
      * 重试策略
      */
     private String retryStrategy = RetryStrategyKeys.NO;
+
+    /**
+     * 容错策略
+     */
+    private String tolerantStrategy = TolerantStrategyKeys.FAIL_FAST;
 }

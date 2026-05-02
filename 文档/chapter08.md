@@ -378,9 +378,9 @@ public class LoadBalancerFactory {
 代码如下：
 
 ```java
-roundRobin=com.yupi.yurpc.loadbalancer.RoundRobinLoadBalancer
-random=com.yupi.yurpc.loadbalancer.RandomLoadBalancer
-consistentHash=com.yupi.yurpc.loadbalancer.ConsistentHashLoadBalancer
+roundRobin=com.rom.romrpc.loadbalancer.RoundRobinLoadBalancer
+random=com.rom.romrpc.loadbalancer.RandomLoadBalancer
+consistentHash=com.rom.romrpc.loadbalancer.ConsistentHashLoadBalancer
 ```
 
 4）为 RpcConfig 全局配置新增负载均衡器的配置，代码如下：

@@ -1,0 +1,4 @@
+failBack=com.rom.romrpc.fault.tolerant.FailBackTolerantStrategy
+failFast=com.rom.romrpc.fault.tolerant.FailFastTolerantStrategy
+failOver=com.rom.romrpc.fault.tolerant.FailOverTolerantStrategy
+failSafe=com.rom.romrpc.fault.tolerant.FailSafeTolerantStrategy
