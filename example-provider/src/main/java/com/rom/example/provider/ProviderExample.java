@@ -1,15 +1,13 @@
 package com.rom.example.provider;
 
-import com.rom.example.common.service.UserService;
-import com.rom.romrpc.RpcApplication;
-import com.rom.romrpc.config.RegistryConfig;
-import com.rom.romrpc.config.RpcConfig;
-import com.rom.romrpc.model.ServiceMetaInfo;
-import com.rom.romrpc.registry.LocalRegistry;
-import com.rom.romrpc.registry.Registry;
-import com.rom.romrpc.registry.RegistryFactory;
+import java.util.ArrayList;
+import java.util.List;
 
-import com.rom.romrpc.server.tcp.VertxTcpServer;
+import com.rom.example.common.service.UserService;
+
+import com.rom.romrpc.bootstrap.ProviderBootstrap;
+import com.rom.romrpc.model.ServiceRegisterInfo;
+
 
 /**
  * 提供者示例
@@ -17,35 +15,14 @@ import com.rom.romrpc.server.tcp.VertxTcpServer;
  */
 public class ProviderExample {
     public static void main(String[] args) {
-        // RPC 框架初始化
-        RpcApplication.init();
-        
-        // 注册服务
-        String serviceName = UserService.class.getName();
-        LocalRegistry.register(serviceName, UserServiceImpl.class);
 
-         // 注册服务到注册中心
-        RpcConfig rpcConfig = RpcApplication.getRpcConfig();
-        RegistryConfig registryConfig = rpcConfig.getRegistryConfig();
-        Registry registry = RegistryFactory.getInstance(registryConfig.getRegistry());
-        ServiceMetaInfo serviceMetaInfo = new ServiceMetaInfo();
-        serviceMetaInfo.setServiceName(serviceName);
-        serviceMetaInfo.setServiceHost(rpcConfig.getServerHost());
-        serviceMetaInfo.setServicePort(rpcConfig.getServerPort());
-        try {
-            registry.register(serviceMetaInfo);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+         // 要注册的服务
+        List<ServiceRegisterInfo<?>> serviceRegisterInfoList = new ArrayList<>();
+        ServiceRegisterInfo<UserService> serviceRegisterInfo = new ServiceRegisterInfo<>(UserService.class.getName(), UserServiceImpl.class);
+        serviceRegisterInfoList.add(serviceRegisterInfo);
 
-
-        // 启动 web 服务
-        // HttpServer httpServer = new VertxHttpServer();
-        // httpServer.doStart(RpcApplication.getRpcConfig().getServerPort());
-
-        // 启动 TCP 服务
-        VertxTcpServer vertxTcpServer = new VertxTcpServer();
-        vertxTcpServer.doStart(8080);
+        // 服务提供者初始化
+        ProviderBootstrap.init(serviceRegisterInfoList);
 
     }
 }
