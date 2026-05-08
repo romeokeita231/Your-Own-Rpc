@@ -16,7 +16,7 @@
 
 所以，我们需要自己自定义一套 RPC 协议，比如利用 TCP 等传输层协议、自己定义请求响应结构，来实现性能更高、更灵活、更安全的 RPC 框架。
 
-本节教程，鱼皮会带大家自定义 RPC 协议，巩固计算机网络知识，并提升自己的系统设计能力。
+本节教程，会带大家自定义 RPC 协议，巩固计算机网络知识，并提升自己的系统设计能力。
 
 ## 二、设计方案
 
@@ -69,7 +69,31 @@
 
 基于以上的思考，我们可以得到最终的消息结构设计，如下图：
 
-<img src="../学习笔记/images/073.webp" width="450">
+```mermaid
+graph TB
+    subgraph 请求头[请求头 - 17字节]
+        subgraph 字段1[ ]
+            A1[Magic数<br/>8bit]
+            A2[版本<br/>8bit]
+            A3[序列化方式<br/>8bit]
+            A4[类型<br/>8bit]
+            A5[状态<br/>8bit]
+            B[请求id - 8字节Long类型<br/>64bit]
+            C[请求体数据长度<br/>32bit]
+        end
+        
+    end
+    D[请求体 body]
+    
+    style A1 fill:#e8f5e9,stroke:#333
+    style A2 fill:#e8f5e9,stroke:#333
+    style A3 fill:#e8f5e9,stroke:#333
+    style A4 fill:#e8f5e9,stroke:#333
+    style A5 fill:#e8f5e9,stroke:#333
+    style B fill:#c8e6c9,stroke:#333
+    style C fill:#ffe0b2,stroke:#333
+    style D fill:#c5cae9,stroke:#333
+```
 
 实际上，这些数据应该是紧凑的，请求头信息总长 17 个字节。也就是说，上述消息结构，本质上就是拼接在一起的一个字节数组。我们后续实现时，需要有 **消息编码器** 和 **消息解码器**，编码器先 new 一个空的 Buffer 缓冲区，然后按照顺序向缓冲区依次写入这些数据；解码器在读取时也按照顺序依次读取，就能还原出编码前的数据。
 
@@ -79,7 +103,7 @@
 
 如果大家是第一次设计协议，或者经验不足，强烈建议大家先去学一下优秀开源框架的协议设计，这样不会说毫无头绪。
 
-比如鱼皮就参考了 Dubbo 的协议设计，如下图(并没有图)
+比如这里就参考了 Dubbo 的协议设计
 
 明确了设计后，我们来开发实现，就比较简单了。
 
@@ -476,9 +500,47 @@ public class VertxTcpClient {
 
 在上一步中，我们也注意到了，Vert.x 的 TCP 服务器收发的消息是 Buffer 类型，不能直接写入一个对象。因此，我们需要编码器和解码器，将 Java 的消息对象和 Buffer 进行相互转换。
 
-鱼皮只用一张图，通过演示整个请求和响应的过程，相信就能带大家了解编码器和解码器的作用。
+只用一张图，通过演示整个请求和响应的过程，相信就能带大家了解编码器和解码器的作用。
 
-<img src="..\学习笔记\images\075.png" width="500">
+```mermaid
+graph LR
+    subgraph 客户端[客户端]
+        C[客户端]
+    end
+    
+    subgraph 服务端[服务端]
+        S[服务端]
+    end
+    
+    subgraph 客户端处理[ ]
+        CD[解码器]
+        CH[响应处理器]
+    end
+    
+    subgraph 服务端处理[ ]
+        SD[解码器]
+        SH[请求处理器]
+    end
+    
+    C -->|1. 请求 ProtocolMessage<RpcRequest>| E1[编码器]
+    E1 -->|2. 请求 Buffer| S
+    S -->|5. 解码 ProtocolMessage<RpcRequest>| SD
+    SD --> SH
+    
+    S -->|4. 响应 ProtocolMessage<RpcResponse>| E2[编码器]
+    E2 -->|5. 响应 Buffer| C
+    C -->|6. 解码 ProtocolMessage<RpcResponse>| CD
+    CD --> CH
+    
+    style C fill:#fff,stroke:#333
+    style S fill:#fff,stroke:#333
+    style E1 fill:#fff,stroke:#333
+    style E2 fill:#fff,stroke:#333
+    style CD fill:#fff,stroke:#333
+    style SD fill:#fff,stroke:#333
+    style CH fill:#fff,stroke:#333
+    style SH fill:#fff,stroke:#333
+```
 
 之前 HTTP 请求和响应时，直接从请求 body 处理器中获取到 body 字节数组，再通过序列化（反序列化）得到 RpcRequest 或 RpcResponse 对象。使用 TCP 服务器后，只不过改为从 Buffer 中获取字节数组，然后编解码为 RpcRequest 或 RpcResponse 对象。其他的后续处理流程都是可复用的。
 
@@ -1490,6 +1552,6 @@ public class ServiceProxy implements InvocationHandler {
 
 最后再给大家抛个小问题：为什么 tcpServer 不提供个 server 接口，或者和 httpServer 共用接口？
 
-鱼皮的想法是这样的：替换这两个服务器（协议实现）涉及的改动点非常多，比如 RPC 协议、请求处理器等，不是直接能通过配置就替换的，而且 RPC 框架一般也不需要替换底层的协议，只使用 TCP 会更好。
+我的想法是这样的：替换这两个服务器（协议实现）涉及的改动点非常多，比如 RPC 协议、请求处理器等，不是直接能通过配置就替换的，而且 RPC 框架一般也不需要替换底层的协议，只使用 TCP 会更好。
 
 所以希望大家在系统设计时，一定要灵活，按需设计，不要学了技术后就无脑应用！
